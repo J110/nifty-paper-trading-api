@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: nifty-paper-trading-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: DHAN_ACCESS_TOKEN
+        sync: false
+      - key: DHAN_CLIENT_ID
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+    healthCheckPath: /health
+    plan: free
