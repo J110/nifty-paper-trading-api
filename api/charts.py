@@ -269,14 +269,16 @@ async def get_drawdown_comparison(
         if len(future_closes) >= min_complete_days:
             min_future = min(future_closes)
             actual_dd = (min_future - today_close) / today_close
-            actual_dd_pct = round(actual_dd * 100, 2)
+            actual_dd_pct = round(min(actual_dd * 100, 0.0), 2)  # cap at 0
             is_partial = len(future_closes) < 30
-        elif len(future_closes) > 0:
+        elif len(future_closes) >= 5:
+            # Need at least 5 trading days for a meaningful partial
             min_future = min(future_closes)
             actual_dd = (min_future - today_close) / today_close
-            actual_dd_pct = round(actual_dd * 100, 2)
+            actual_dd_pct = round(min(actual_dd * 100, 0.0), 2)  # cap at 0
             is_partial = True
         else:
+            # Too few forward days — don't show actual
             actual_dd_pct = None
             is_partial = True
 
