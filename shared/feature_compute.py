@@ -539,4 +539,11 @@ def compute_features_for_date(merged_daily_df, target_date=None,
         if v is None or (isinstance(v, float) and np.isnan(v)):
             return None  # This date doesn't have enough history for warmup
 
+    # Ensure all values are native Python types (not numpy) for JSON serialization
+    for k, v in features.items():
+        if isinstance(v, (np.integer,)):
+            features[k] = int(v)
+        elif isinstance(v, (np.floating,)):
+            features[k] = float(v)
+
     return features
