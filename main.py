@@ -131,23 +131,41 @@ async def run_backfill_endpoint():
     """
     Run historical backfill from Jan 2026 to today.
     Populates predictions, trades, and daily PnL for all versions.
-    Takes ~60 seconds. Run once after initial deployment.
+    Takes ~60-120 seconds. Run once after initial deployment.
+    Runs synchronously so errors are returned in the response.
     """
     from backfill import run_backfill
     from db.database import async_session_factory
-    import asyncio
 
-    async def _do_backfill():
+    logger.info("Backfill endpoint triggered — running synchronously")
+    try:
         async with async_session_factory() as db:
-            try:
-                result = await run_backfill(db)
-                logger.info(f"Backfill result: {result}")
-            except Exception as e:
-                logger.error(f"Backfill failed: {e}", exc_info=True)
+            result = await run_backfill(db)
+            logger.info(f"Backfill result: {result}")
+            return {"status": "backfill_complete", "result": result}
+    except Exception as e:
+        logger.error(f"Backfill failed: {e}", exc_info=True)
+        import traceback
+        return {
+            "status": "backfill_failed",
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        }
 
-    logger.info("Backfill endpoint triggered")
-    asyncio.create_task(_do_backfill())
-    return {
-        "status": "backfill_started",
-        "message": "Historical backfill running in background. Check /api/signals/history in ~60 seconds.",
-    }
+
+@app.get("/api/debug/db-counts")
+async def db_counts():
+    """Check how many rows are in each table — useful for debugging backfill."""
+    from sqlalchemy import text
+    from db.database import async_session_factory
+
+    async with async_session_factory() as db:
+        tables = ["predictions", "trades", "daily_pnl", "daily_features"]
+        counts = {}
+        for table in tables:
+            try:
+                result = await db.execute(text(f"SELECT COUNT(*) FROM {table}"))
+                counts[table] = result.scalar()
+            except Exception as e:
+                counts[table] = f"error: {e}"
+        return counts

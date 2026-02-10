@@ -2,6 +2,9 @@
 Historical backfill script — populates the database with predictions and trades
 from Jan 1, 2026 to today by running the ML model against historical Nifty data.
 
+CRITICAL: Features must match the exact 37 training feature names and computation
+from nifty_options_model/src/feature_engineering.py.
+
 Usage: Called via POST /api/backfill endpoint on Render.
 """
 
@@ -35,176 +38,289 @@ logger = logging.getLogger(__name__)
 BACKFILL_START = date(2026, 1, 1)
 
 
-def _build_features_for_date(idx: int, df: pd.DataFrame, vix_series: pd.Series,
-                               trade_date: date) -> dict:
-    """Build feature vector from historical data at a given index."""
-    close = df["Close"].iloc[:idx + 1]
-    spot = float(close.iloc[-1])
-    vix = float(vix_series.iloc[idx]) if idx < len(vix_series) else 14.0
+# ── helpers ──────────────────────────────────────────────────────────
 
-    if pd.isna(vix) or vix <= 0:
-        vix = 14.0
-
-    features = {}
-
-    # Price features
-    features["nifty_close"] = spot
-    features["nifty_5d_return"] = (spot / float(close.iloc[-5]) - 1) if len(close) >= 5 else 0
-    features["nifty_10d_return"] = (spot / float(close.iloc[-10]) - 1) if len(close) >= 10 else 0
-    features["nifty_20d_return"] = (spot / float(close.iloc[-20]) - 1) if len(close) >= 20 else 0
-    features["nifty_50d_return"] = (spot / float(close.iloc[-50]) - 1) if len(close) >= 50 else 0
-
-    # SMA distance
-    if len(close) >= 20:
-        sma20 = float(close.rolling(20).mean().iloc[-1])
-        features["dist_sma20"] = (spot - sma20) / sma20
+def _get_last_thursday(year: int, month: int) -> date:
+    """Get the last Thursday of a given month (monthly expiry)."""
+    if month == 12:
+        next_month_first = date(year + 1, 1, 1)
     else:
-        features["dist_sma20"] = 0
+        next_month_first = date(year, month + 1, 1)
+    last_day = next_month_first - timedelta(days=1)
+    # Walk back to Thursday (weekday 3)
+    offset = (last_day.weekday() - 3) % 7
+    return last_day - timedelta(days=offset)
 
-    if len(close) >= 50:
-        sma50 = float(close.rolling(50).mean().iloc[-1])
-        features["dist_sma50"] = (spot - sma50) / sma50
+
+def _get_monthly_expiries(start: date, end: date) -> list:
+    """Generate list of monthly expiry dates (last Thursday) in range."""
+    expiries = []
+    y, m = start.year, start.month
+    while True:
+        exp = _get_last_thursday(y, m)
+        if exp > end:
+            break
+        if exp >= start:
+            expiries.append(exp)
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+    return expiries
+
+
+def _download_market_data(start: date, end: date):
+    """
+    Download all market data needed for the 37 training features:
+    Nifty, India VIX, S&P 500, US VIX, DXY, US 10Y Treasury.
+    Returns aligned DataFrames.
+    """
+    import yfinance as yf
+
+    logger.info(f"Downloading market data from {start} to {end}")
+
+    # Nifty 50
+    nifty = yf.download("^NSEI", start=start.isoformat(), end=end.isoformat(), progress=False)
+    if isinstance(nifty.columns, pd.MultiIndex):
+        nifty.columns = nifty.columns.get_level_values(0)
+    logger.info(f"Nifty: {len(nifty)} days")
+
+    # India VIX
+    india_vix = yf.download("^INDIAVIX", start=start.isoformat(), end=end.isoformat(), progress=False)
+    if isinstance(india_vix.columns, pd.MultiIndex):
+        india_vix.columns = india_vix.columns.get_level_values(0)
+    logger.info(f"India VIX: {len(india_vix)} days")
+
+    # S&P 500
+    sp500 = yf.download("^GSPC", start=start.isoformat(), end=end.isoformat(), progress=False)
+    if isinstance(sp500.columns, pd.MultiIndex):
+        sp500.columns = sp500.columns.get_level_values(0)
+    logger.info(f"S&P 500: {len(sp500)} days")
+
+    # US VIX (CBOE)
+    us_vix = yf.download("^VIX", start=start.isoformat(), end=end.isoformat(), progress=False)
+    if isinstance(us_vix.columns, pd.MultiIndex):
+        us_vix.columns = us_vix.columns.get_level_values(0)
+    logger.info(f"US VIX: {len(us_vix)} days")
+
+    # DXY (US Dollar Index)
+    dxy = yf.download("DX-Y.NYB", start=start.isoformat(), end=end.isoformat(), progress=False)
+    if isinstance(dxy.columns, pd.MultiIndex):
+        dxy.columns = dxy.columns.get_level_values(0)
+    logger.info(f"DXY: {len(dxy)} days")
+
+    # US 10Y Treasury Yield
+    us10y = yf.download("^TNX", start=start.isoformat(), end=end.isoformat(), progress=False)
+    if isinstance(us10y.columns, pd.MultiIndex):
+        us10y.columns = us10y.columns.get_level_values(0)
+    logger.info(f"US 10Y: {len(us10y)} days")
+
+    return nifty, india_vix, sp500, us_vix, dxy, us10y
+
+
+def _build_feature_matrix(nifty: pd.DataFrame, india_vix_df: pd.DataFrame,
+                           sp500: pd.DataFrame, us_vix_df: pd.DataFrame,
+                           dxy: pd.DataFrame, us10y: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build the full feature matrix matching the exact 37 training features.
+    Returns DataFrame indexed by date with columns matching feature_names.json.
+    """
+    # Work with Nifty as the base index
+    df = pd.DataFrame(index=nifty.index)
+    close = nifty["Close"]
+    high = nifty["High"]
+
+    # ── 1. Trend & Momentum ─────────────────────────────────────────
+    df["nifty_return_5d"] = close.pct_change(5)
+    df["nifty_return_10d"] = close.pct_change(10)
+    df["nifty_return_20d"] = close.pct_change(20)
+
+    sma50 = close.rolling(50).mean()
+    sma200 = close.rolling(200).mean()
+    df["nifty_distance_50dma"] = (close - sma50) / sma50 * 100
+    df["nifty_distance_200dma"] = (close - sma200) / sma200 * 100
+    df["golden_cross"] = (sma50 > sma200).astype(int)
+
+    rsi = ta_lib.momentum.RSIIndicator(close, window=14)
+    df["rsi_14"] = rsi.rsi()
+
+    # Higher highs over 5 weeks
+    weekly_high = high.resample("W").max()
+    weekly_hh = (weekly_high > weekly_high.shift(1)).astype(int)
+    weekly_hh_count = weekly_hh.rolling(5, min_periods=1).sum()
+    df["higher_highs_5w"] = weekly_hh_count.reindex(df.index, method="ffill").fillna(0)
+
+    # ── 2. Volatility ───────────────────────────────────────────────
+    # Align India VIX to Nifty dates
+    vix_close = india_vix_df["Close"].reindex(df.index).ffill().fillna(14.0)
+    df["india_vix"] = vix_close
+
+    df["vix_change_5d"] = vix_close - vix_close.shift(5)
+
+    # VIX percentile over 252 days
+    df["vix_percentile_252d"] = vix_close.rolling(252, min_periods=60).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    )
+
+    # Realized volatility (annualized, in percentage)
+    log_returns = np.log(close / close.shift(1))
+    df["realized_vol_20d"] = log_returns.rolling(20).std() * np.sqrt(252) * 100
+
+    # Variance risk premium
+    df["variance_risk_premium"] = df["india_vix"] - df["realized_vol_20d"]
+
+    # VIX rising streak
+    vix_rising = (vix_close > vix_close.shift(1)).astype(int)
+    vix_streak = pd.Series(0, index=df.index, dtype=int)
+    for i in range(1, len(df)):
+        if vix_rising.iloc[i] == 1:
+            vix_streak.iloc[i] = vix_streak.iloc[i - 1] + 1
+        else:
+            vix_streak.iloc[i] = 0
+    df["vix_rising_streak"] = vix_streak
+
+    # ── 3. Sentiment ────────────────────────────────────────────────
+    df["pcr_proxy"] = df["vix_change_5d"] / (df["nifty_return_5d"] * 100 + 0.001)
+
+    # ── 4. Global context ───────────────────────────────────────────
+    # S&P 500
+    sp_close = sp500["Close"].reindex(df.index).ffill() if len(sp500) > 0 else pd.Series(0, index=df.index)
+    if sp_close.notna().sum() >= 100:
+        df["sp500_return_5d"] = sp_close.pct_change(5)
     else:
-        features["dist_sma50"] = 0
+        df["sp500_return_5d"] = 0.0
 
-    # Volatility
-    if len(close) >= 20:
-        log_ret = np.log(close / close.shift(1)).dropna()
-        features["realized_vol_20d"] = float(log_ret.tail(20).std() * np.sqrt(252))
-        features["realized_vol_10d"] = float(log_ret.tail(10).std() * np.sqrt(252))
+    # US VIX
+    usvix_close = us_vix_df["Close"].reindex(df.index).ffill() if len(us_vix_df) > 0 else pd.Series(0, index=df.index)
+    df["us_vix"] = usvix_close.fillna(0)
+    if usvix_close.notna().sum() >= 100:
+        df["us_vix_change_5d"] = usvix_close - usvix_close.shift(5)
     else:
-        features["realized_vol_20d"] = 0.15
-        features["realized_vol_10d"] = 0.15
+        df["us_vix_change_5d"] = 0.0
 
-    # VIX
-    features["vix"] = vix
-    features["vix_20d_avg"] = vix
-    features["vix_percentile_20d"] = 0.5
-    if idx >= 20 and idx < len(vix_series):
-        vix_window = vix_series.iloc[max(0, idx - 20):idx + 1].dropna()
-        if len(vix_window) > 5:
-            features["vix_20d_avg"] = float(vix_window.mean())
-            features["vix_percentile_20d"] = float(
-                (vix_window < vix).sum() / len(vix_window)
-            )
-
-    # Technical indicators
-    if len(close) >= 14:
-        rsi = ta_lib.momentum.RSIIndicator(close, window=14)
-        rsi_val = rsi.rsi().iloc[-1]
-        features["rsi_14"] = float(rsi_val) if not pd.isna(rsi_val) else 50.0
+    # DXY
+    dxy_close = dxy["Close"].reindex(df.index).ffill() if len(dxy) > 0 else pd.Series(0, index=df.index)
+    df["dxy_level"] = dxy_close.fillna(0)
+    if dxy_close.notna().sum() >= 100:
+        df["dxy_change_5d"] = dxy_close - dxy_close.shift(5)
     else:
-        features["rsi_14"] = 50.0
+        df["dxy_change_5d"] = 0.0
 
-    high_series = df["High"].iloc[:idx + 1]
-    low_series = df["Low"].iloc[:idx + 1]
-
-    if len(close) >= 14:
-        adx = ta_lib.trend.ADXIndicator(high_series, low_series, close, window=14)
-        adx_val = adx.adx().iloc[-1]
-        features["adx_14"] = float(adx_val) if not pd.isna(adx_val) else 20.0
-        di_p = adx.adx_pos().iloc[-1]
-        di_m = adx.adx_neg().iloc[-1]
-        features["di_plus"] = float(di_p) if not pd.isna(di_p) else 15.0
-        features["di_minus"] = float(di_m) if not pd.isna(di_m) else 15.0
+    # US 10Y Treasury
+    us10y_close = us10y["Close"].reindex(df.index).ffill() if len(us10y) > 0 else pd.Series(0, index=df.index)
+    df["us10y_level"] = us10y_close.fillna(0)
+    if us10y_close.notna().sum() >= 100:
+        df["us10y_change_5d"] = us10y_close - us10y_close.shift(5)
+        df["us10y_change_20d"] = us10y_close - us10y_close.shift(20)
     else:
-        features["adx_14"] = 20.0
-        features["di_plus"] = 15.0
-        features["di_minus"] = 15.0
+        df["us10y_change_5d"] = 0.0
+        df["us10y_change_20d"] = 0.0
 
-    if len(close) >= 26:
-        macd = ta_lib.trend.MACD(close)
-        mh = macd.macd_diff().iloc[-1]
-        features["macd_hist"] = float(mh) if not pd.isna(mh) else 0.0
-    else:
-        features["macd_hist"] = 0.0
+    # ── 5. Calendar ─────────────────────────────────────────────────
+    df["day_of_month"] = df.index.day
+    df["month"] = df.index.month
+    df["is_volatile_month"] = df["month"].isin([9, 10]).astype(int)
 
-    if len(close) >= 20:
-        bb = ta_lib.volatility.BollingerBands(close, window=20, window_dev=2)
-        bb_u = float(bb.bollinger_hband().iloc[-1])
-        bb_l = float(bb.bollinger_lband().iloc[-1])
-        bb_w = (bb_u - bb_l) / spot
-        features["bb_width_20d"] = bb_w
-        features["bb_position"] = (spot - bb_l) / (bb_u - bb_l) if (bb_u - bb_l) > 0 else 0.5
-    else:
-        features["bb_width_20d"] = 0.05
-        features["bb_position"] = 0.5
+    # Monthly expiry features
+    first_date = df.index[0].date() if hasattr(df.index[0], 'date') else df.index[0]
+    last_date = df.index[-1].date() if hasattr(df.index[-1], 'date') else df.index[-1]
+    expiries = _get_monthly_expiries(first_date, last_date + timedelta(days=60))
+    trading_dates = df.index.date if hasattr(df.index[0], 'date') else df.index
 
-    # Calendar
-    features["day_of_week"] = trade_date.weekday()
-    features["day_of_month"] = trade_date.day
-    features["month"] = trade_date.month
-    features["days_to_expiry"] = 10
+    days_to_expiry_list = []
+    is_expiry_week_list = []
+    for d in df.index:
+        d_date = d.date() if hasattr(d, 'date') else d
+        next_exp = None
+        for exp in expiries:
+            if exp >= d_date:
+                next_exp = exp
+                break
+        if next_exp is not None:
+            # Count trading days between d and expiry
+            mask = [td for td in trading_dates if d_date <= td <= next_exp]
+            dte = len(mask)
+            days_to_expiry_list.append(dte)
+            is_expiry_week_list.append(1 if dte <= 5 else 0)
+        else:
+            days_to_expiry_list.append(30)
+            is_expiry_week_list.append(0)
 
-    # Drawdown
-    if len(close) >= 20:
-        rm = close.rolling(20).max()
-        features["max_drawdown_20d_sofar"] = float((close / rm - 1).iloc[-1])
-    else:
-        features["max_drawdown_20d_sofar"] = 0
+    df["is_expiry_week"] = is_expiry_week_list
+    df["days_to_monthly_expiry"] = days_to_expiry_list
 
-    if len(close) >= 10:
-        rm10 = close.rolling(10).max()
-        features["max_drawdown_10d_sofar"] = float((close / rm10 - 1).iloc[-1])
-    else:
-        features["max_drawdown_10d_sofar"] = 0
+    # ── 6. Options-derived (placeholders — no historical option chain) ──
+    df["deep_otm_oi_ratio"] = 0.0
+    df["deep_otm_oi_ratio_change_5d"] = 0.0
+    df["put_oi_buildup_ratio"] = 0.0
+    df["put_volume_surge_ratio"] = 1.0
+    df["iv_skew_steepness"] = 0.0
+    df["iv_skew_change_5d"] = 0.0
+    df["atm_iv"] = df["india_vix"] / 100.0  # rough proxy
+    df["atm_iv_percentile_252d"] = df["vix_percentile_252d"]  # same proxy
+    df["atm_put_intraday_range"] = 0.0
 
-    # Option placeholders (no historical option chain)
-    features["iv_skew"] = 0.03
-    features["put_call_ratio"] = 1.0
-    features["max_oi_put_strike"] = spot * 0.97
-    features["max_oi_call_strike"] = spot * 1.03
-    features["fii_net_5d"] = 0
-    features["dii_net_5d"] = 0
-    features["deep_otm_oi_ratio"] = 0
-    features["iv_skew_steepness"] = 0
-    features["atm_iv"] = vix / 100
-    features["atm_iv_percentile_252d"] = 50
+    # ── Clean up ────────────────────────────────────────────────────
+    df = df.fillna(0.0)
 
-    # Clean NaN/inf
-    for k, v in features.items():
-        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-            features[k] = 0.0
+    # Replace inf/-inf
+    df = df.replace([np.inf, -np.inf], 0.0)
 
-    return features
+    return df
 
+
+# ── main backfill ────────────────────────────────────────────────────
 
 async def run_backfill(db_session) -> dict:
     """
     Run full historical backfill from Jan 2026 to today.
+    Clears existing data first, then re-populates.
     Returns summary stats.
     """
-    import yfinance as yf
+    from sqlalchemy import text
 
     logger.info("=== Starting historical backfill ===")
 
-    # Download historical data (need extra history for feature computation)
-    start_download = date(2025, 6, 1)  # 6 months before backfill start for features
+    # Clear existing backfill data so re-runs don't hit unique constraint errors
+    logger.info("Clearing existing backfill data...")
+    await db_session.execute(text("DELETE FROM daily_pnl"))
+    await db_session.execute(text("DELETE FROM trades"))
+    await db_session.execute(text("DELETE FROM predictions"))
+    await db_session.execute(text("DELETE FROM daily_features"))
+    await db_session.commit()
+    logger.info("Existing data cleared")
+
+    # Download historical data (need extra history for feature computation: 200-day MA, 252-day VIX)
+    start_download = date(2025, 1, 1)  # ~1 year before backfill start for warmup
     end_download = date.today()
 
-    logger.info(f"Downloading Nifty data from {start_download} to {end_download}")
-    nifty = yf.download("^NSEI", start=start_download.isoformat(),
-                         end=end_download.isoformat(), progress=False)
+    nifty, india_vix_df, sp500, us_vix_df, dxy, us10y = _download_market_data(
+        start_download, end_download
+    )
 
     if nifty.empty:
         return {"error": "Failed to download Nifty data from yfinance"}
 
-    # Flatten multi-level columns if present
-    if isinstance(nifty.columns, pd.MultiIndex):
-        nifty.columns = nifty.columns.get_level_values(0)
+    # Build full feature matrix
+    logger.info("Building feature matrix...")
+    feature_df = _build_feature_matrix(nifty, india_vix_df, sp500, us_vix_df, dxy, us10y)
+    logger.info(f"Feature matrix: {feature_df.shape}")
 
-    logger.info(f"Downloaded {len(nifty)} days of Nifty data")
-
-    # Download VIX
-    vix_df = yf.download("^INDIAVIX", start=start_download.isoformat(),
-                          end=end_download.isoformat(), progress=False)
-    if isinstance(vix_df.columns, pd.MultiIndex):
-        vix_df.columns = vix_df.columns.get_level_values(0)
-
-    vix_series = vix_df["Close"] if not vix_df.empty else pd.Series(dtype=float)
-
-    # Align VIX with Nifty dates
-    vix_aligned = vix_series.reindex(nifty.index).ffill().fillna(14.0)
+    # The 37 training feature names (order matters for model prediction)
+    TRAINING_FEATURES = [
+        "nifty_return_5d", "nifty_return_10d", "nifty_return_20d",
+        "nifty_distance_50dma", "nifty_distance_200dma", "golden_cross",
+        "rsi_14", "higher_highs_5w", "india_vix", "vix_change_5d",
+        "vix_percentile_252d", "realized_vol_20d", "variance_risk_premium",
+        "vix_rising_streak", "pcr_proxy", "sp500_return_5d", "us_vix",
+        "us_vix_change_5d", "dxy_level", "dxy_change_5d", "us10y_level",
+        "us10y_change_5d", "us10y_change_20d", "day_of_month", "month",
+        "is_expiry_week", "days_to_monthly_expiry", "is_volatile_month",
+        "deep_otm_oi_ratio", "deep_otm_oi_ratio_change_5d",
+        "put_oi_buildup_ratio", "put_volume_surge_ratio",
+        "iv_skew_steepness", "iv_skew_change_5d", "atm_iv",
+        "atm_iv_percentile_252d", "atm_put_intraday_range",
+    ]
 
     # Load model
     model_runner = ModelRunner(DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH)
@@ -212,11 +328,11 @@ async def run_backfill(db_session) -> dict:
         return {"error": "Model not loaded"}
 
     # Filter to trading days from BACKFILL_START onwards
-    nifty_dates = nifty.index.date
-    backfill_mask = nifty_dates >= BACKFILL_START
-    backfill_indices = [i for i, m in enumerate(backfill_mask) if m]
+    nifty_close = nifty["Close"]
+    nifty_dates = nifty.index
+    backfill_dates = [d for d in nifty_dates if d.date() >= BACKFILL_START]
 
-    logger.info(f"Backfilling {len(backfill_indices)} trading days from {BACKFILL_START}")
+    logger.info(f"Backfilling {len(backfill_dates)} trading days from {BACKFILL_START}")
 
     # Track per-version state
     version_state = {}
@@ -224,7 +340,7 @@ async def run_backfill(db_session) -> dict:
         version_state[v] = {
             "capital": INITIAL_CAPITAL,
             "cumulative_pnl": 0.0,
-            "open_trades": [],  # list of trade dicts
+            "open_trades": [],
         }
 
     stats = {
@@ -234,34 +350,42 @@ async def run_backfill(db_session) -> dict:
         "trades_closed": 0,
     }
 
-    for idx in backfill_indices:
-        trade_date = nifty_dates[idx]
-        spot = float(nifty["Close"].iloc[idx])
-        vix = float(vix_aligned.iloc[idx])
+    for ts in backfill_dates:
+        trade_date = ts.date() if hasattr(ts, 'date') else ts
+
+        # Check feature row exists
+        if ts not in feature_df.index:
+            continue
+
+        spot = float(nifty_close.loc[ts])
+        vix = float(feature_df.loc[ts, "india_vix"])
 
         if pd.isna(spot) or spot <= 0:
             continue
 
-        # Build features
-        features = _build_features_for_date(idx, nifty, vix_aligned, trade_date)
+        # Build feature dict from feature matrix (exact 37 training features)
+        features = {}
+        for col in TRAINING_FEATURES:
+            val = feature_df.loc[ts, col] if col in feature_df.columns else 0.0
+            features[col] = float(val) if not (pd.isna(val)) else 0.0
 
-        # Run model
+        # Run model prediction
         prediction_value = model_runner.predict(features)
 
-        # Store daily features
+        # Store daily features (extra display-friendly names for the frontend)
         daily_feature = DailyFeature(
             date=trade_date,
             features=features,
             vix=vix,
-            vix_20d_avg=features.get("vix_20d_avg"),
-            nifty_20d_return=features.get("nifty_20d_return"),
-            nifty_50d_return=features.get("nifty_50d_return"),
-            iv_skew=features.get("iv_skew"),
-            fii_net=features.get("fii_net_5d"),
-            dii_net=features.get("dii_net_5d"),
-            put_call_ratio=features.get("put_call_ratio"),
+            vix_20d_avg=features.get("india_vix", vix),
+            nifty_20d_return=features.get("nifty_return_20d"),
+            nifty_50d_return=features.get("nifty_distance_50dma"),
+            iv_skew=features.get("iv_skew_steepness"),
+            fii_net=0,
+            dii_net=0,
+            put_call_ratio=features.get("pcr_proxy"),
             rsi_14=features.get("rsi_14"),
-            adx_14=features.get("adx_14"),
+            adx_14=0,  # not in training features
         )
         db_session.add(daily_feature)
 
@@ -342,8 +466,7 @@ async def run_backfill(db_session) -> dict:
                     realized_pnl = pnl_per_unit * ot["num_lots"] * NIFTY_LOT_SIZE
                     rpnl_pct = realized_pnl / ot["capital_deployed"] * 100 if ot["capital_deployed"] > 0 else 0
 
-                    # Update trade in DB (find by trade_id)
-                    from sqlalchemy import select, update
+                    from sqlalchemy import update
                     await db_session.execute(
                         update(Trade).where(Trade.trade_id == ot["trade_id"]).values(
                             status="closed",
