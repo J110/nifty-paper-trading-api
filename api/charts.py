@@ -187,6 +187,117 @@ async def get_nifty_chart(
         return candles
 
 
+@router.get("/chart-data/drawdown-comparison")
+async def get_drawdown_comparison(
+    period: str = Query("6m", regex="^(3m|6m|1y|all)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Predicted vs actual 30-day max drawdown for model accuracy comparison.
+
+    For each prediction date, returns:
+      - predicted_drawdown_pct: what the model predicted
+      - actual_drawdown_pct: (min close in next 30 trading days - close) / close
+      - is_partial: True if fewer than 21 trading days of forward data available
+    """
+    today = today_ist()
+
+    period_days = {"3m": 90, "6m": 180, "1y": 365, "all": 1825}
+    days = period_days.get(period, 180)
+    start_date = today - timedelta(days=days)
+
+    # 1. Fetch predictions (one per date, all versions have same predicted_drawdown)
+    result = await db.execute(
+        select(
+            Prediction.date,
+            Prediction.predicted_drawdown,
+            Prediction.nifty_spot,
+        ).where(
+            Prediction.date >= start_date,
+            Prediction.version == ACTIVE_VERSIONS[0],
+            Prediction.predicted_drawdown.isnot(None),
+        ).order_by(Prediction.date)
+    )
+    predictions = result.all()
+
+    if not predictions:
+        return {"data": [], "count": 0, "partial_from": None}
+
+    # 2. Fetch Nifty daily closes — need extra 45 calendar days for forward window
+    daily_closes = {}
+    try:
+        dhan = await _get_dhan()
+        candles_raw = await dhan.get_historical_ohlc(days=days + 60)
+        if candles_raw:
+            for c in candles_raw:
+                d = _epoch_to_iso_date(c["timestamp"])
+                daily_closes[d] = c["close"]
+    except Exception:
+        logger.exception("Dhan fetch failed for drawdown comparison")
+
+    # Fallback: use Prediction.nifty_spot if Dhan unavailable
+    if not daily_closes:
+        for p in predictions:
+            if p.nifty_spot and p.nifty_spot > 0:
+                daily_closes[p.date.isoformat()] = p.nifty_spot
+
+    # Build sorted list of (date_str, close) for forward lookups
+    sorted_closes = sorted(daily_closes.items())
+    close_dates = [d for d, _ in sorted_closes]
+    close_values = [v for _, v in sorted_closes]
+
+    # 3. Compute actual drawdown for each prediction date
+    import bisect
+
+    data = []
+    partial_from = None
+    min_complete_days = 21  # ~30 calendar days ≈ 21 trading days
+
+    for pred_date, pred_dd, nifty_spot in predictions:
+        pred_date_str = pred_date.isoformat()
+        pred_dd_pct = round(pred_dd * 100, 2)
+
+        # Find this date's close (prefer Dhan, fall back to nifty_spot)
+        today_close = daily_closes.get(pred_date_str, nifty_spot)
+        if not today_close or today_close <= 0:
+            continue
+
+        # Find next 30 trading-day closes after pred_date
+        idx = bisect.bisect_right(close_dates, pred_date_str)
+        future_closes = close_values[idx:idx + 30]
+
+        if len(future_closes) >= min_complete_days:
+            min_future = min(future_closes)
+            actual_dd = (min_future - today_close) / today_close
+            actual_dd_pct = round(actual_dd * 100, 2)
+            is_partial = len(future_closes) < 30
+        elif len(future_closes) > 0:
+            min_future = min(future_closes)
+            actual_dd = (min_future - today_close) / today_close
+            actual_dd_pct = round(actual_dd * 100, 2)
+            is_partial = True
+        else:
+            actual_dd_pct = None
+            is_partial = True
+
+        if is_partial and partial_from is None:
+            partial_from = pred_date_str
+
+        data.append({
+            "date": pred_date_str,
+            "predicted_drawdown_pct": pred_dd_pct,
+            "actual_drawdown_pct": actual_dd_pct,
+            "nifty_close": round(today_close, 2),
+            "is_partial": is_partial,
+        })
+
+    return {
+        "data": data,
+        "count": len(data),
+        "partial_from": partial_from,
+    }
+
+
 @router.get("/chart-data/equity/{version}")
 async def get_equity_curve(
     version: str,
