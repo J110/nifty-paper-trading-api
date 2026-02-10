@@ -14,7 +14,7 @@ router = APIRouter(prefix="/api")
 
 @router.get("/chart-data/nifty")
 async def get_nifty_chart(
-    period: str = Query("1y", regex="^(1d|1w|1m|3m|6m|1y)$"),
+    period: str = Query("1y", regex="^(1d|5d|1w|1m|3m|6m|1y|2y|3y|5y)$"),
     interval: str = Query("1d", regex="^(5m|1d)$"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -25,7 +25,8 @@ async def get_nifty_chart(
     today = date.today()
 
     period_days = {
-        "1d": 1, "1w": 7, "1m": 30, "3m": 90, "6m": 180, "1y": 365
+        "1d": 1, "5d": 5, "1w": 7, "1m": 30, "3m": 90,
+        "6m": 180, "1y": 365, "2y": 730, "3y": 1095, "5y": 1825,
     }
     days = period_days.get(period, 365)
     start_date = today - timedelta(days=days)
