@@ -72,7 +72,7 @@ DRAWDOWN_IRON_CONDOR = -0.035   # -2.5% to -3.5%: iron condor
 DRAWDOWN_NO_TRADE = -0.035      # < -3.5%: no trade
 
 # VIX filters
-VIX_MIN_ENTRY = 11
+VIX_MIN_ENTRY = 8
 VIX_MAX_ENTRY = 25
 
 # ============================================================
