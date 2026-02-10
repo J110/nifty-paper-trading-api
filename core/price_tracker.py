@@ -188,14 +188,24 @@ class PriceTracker:
             logger.debug(f"Snapshot insert failed (likely duplicate): {e}")
 
     async def compute_delay_analysis(
-        self, version: str, db: AsyncSession
+        self, version: str, db: AsyncSession,
+        data_mode: str = "combined",
+        forward_test_start: Optional[date] = None,
     ) -> dict:
         """
         Aggregate delay impact across all trades for a version.
+        data_mode: 'backtest', 'forwardtest', or 'combined'.
         """
-        result = await db.execute(
-            select(DelayPrice).where(DelayPrice.version == version)
-        )
+        stmt = select(DelayPrice).where(DelayPrice.version == version)
+
+        # Apply data mode filter using signal_date
+        if data_mode != "combined" and forward_test_start is not None:
+            if data_mode == "backtest":
+                stmt = stmt.where(DelayPrice.signal_date < forward_test_start)
+            elif data_mode == "forwardtest":
+                stmt = stmt.where(DelayPrice.signal_date >= forward_test_start)
+
+        result = await db.execute(stmt)
         records = result.scalars().all()
 
         if not records:

@@ -70,21 +70,25 @@ async def get_trades(
 @router.get("/trades/{version}/delay-analysis")
 async def get_delay_analysis(
     version: str,
+    data_mode: str = Query("combined", regex="^(backtest|forwardtest|combined)$"),
     db: AsyncSession = Depends(get_db),
 ):
     """Returns execution delay impact analysis."""
     if version not in ACTIVE_VERSIONS:
         return {"error": f"Unknown version: {version}"}
 
-    analysis = await price_tracker.compute_delay_analysis(version, db)
+    analysis = await price_tracker.compute_delay_analysis(
+        version, db, data_mode=data_mode, forward_test_start=FORWARD_TEST_START,
+    )
 
     return {
         "version": version,
+        "data_mode": data_mode,
         "analysis": analysis,
     }
 
 
-FORWARD_TEST_START = date(2025, 2, 11)
+FORWARD_TEST_START = date(2026, 2, 11)
 
 
 @router.get("/trades/{version}/returns")
