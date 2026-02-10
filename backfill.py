@@ -69,53 +69,59 @@ def _get_monthly_expiries(start: date, end: date) -> list:
     return expiries
 
 
+def _safe_yf_download(ticker: str, start: str, end: str, retries: int = 3) -> pd.DataFrame:
+    """Download a single ticker from yfinance with retries."""
+    import yfinance as yf
+    import time
+
+    for attempt in range(retries):
+        try:
+            data = yf.download(ticker, start=start, end=end, progress=False)
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.get_level_values(0)
+            if not data.empty:
+                logger.info(f"  {ticker}: {len(data)} days (attempt {attempt + 1})")
+                return data
+            logger.warning(f"  {ticker}: empty response (attempt {attempt + 1})")
+        except Exception as e:
+            logger.warning(f"  {ticker}: error on attempt {attempt + 1}: {e}")
+
+        if attempt < retries - 1:
+            time.sleep(2 * (attempt + 1))  # increasing delay between retries
+
+    logger.error(f"  {ticker}: all {retries} attempts failed, returning empty DataFrame")
+    return pd.DataFrame()
+
+
 def _download_market_data(start: date, end: date):
     """
     Download all market data needed for the 37 training features:
     Nifty, India VIX, S&P 500, US VIX, DXY, US 10Y Treasury.
+    Downloads each ticker with retries and delay to avoid rate limiting.
     Returns aligned DataFrames.
     """
-    import yfinance as yf
+    import time
 
+    start_str = start.isoformat()
+    end_str = end.isoformat()
     logger.info(f"Downloading market data from {start} to {end}")
 
-    # Nifty 50
-    nifty = yf.download("^NSEI", start=start.isoformat(), end=end.isoformat(), progress=False)
-    if isinstance(nifty.columns, pd.MultiIndex):
-        nifty.columns = nifty.columns.get_level_values(0)
-    logger.info(f"Nifty: {len(nifty)} days")
+    tickers = {
+        "nifty": "^NSEI",
+        "india_vix": "^INDIAVIX",
+        "sp500": "^GSPC",
+        "us_vix": "^VIX",
+        "dxy": "DX-Y.NYB",
+        "us10y": "^TNX",
+    }
 
-    # India VIX
-    india_vix = yf.download("^INDIAVIX", start=start.isoformat(), end=end.isoformat(), progress=False)
-    if isinstance(india_vix.columns, pd.MultiIndex):
-        india_vix.columns = india_vix.columns.get_level_values(0)
-    logger.info(f"India VIX: {len(india_vix)} days")
+    results = {}
+    for name, ticker in tickers.items():
+        results[name] = _safe_yf_download(ticker, start_str, end_str)
+        time.sleep(1)  # small delay between downloads to avoid rate limiting
 
-    # S&P 500
-    sp500 = yf.download("^GSPC", start=start.isoformat(), end=end.isoformat(), progress=False)
-    if isinstance(sp500.columns, pd.MultiIndex):
-        sp500.columns = sp500.columns.get_level_values(0)
-    logger.info(f"S&P 500: {len(sp500)} days")
-
-    # US VIX (CBOE)
-    us_vix = yf.download("^VIX", start=start.isoformat(), end=end.isoformat(), progress=False)
-    if isinstance(us_vix.columns, pd.MultiIndex):
-        us_vix.columns = us_vix.columns.get_level_values(0)
-    logger.info(f"US VIX: {len(us_vix)} days")
-
-    # DXY (US Dollar Index)
-    dxy = yf.download("DX-Y.NYB", start=start.isoformat(), end=end.isoformat(), progress=False)
-    if isinstance(dxy.columns, pd.MultiIndex):
-        dxy.columns = dxy.columns.get_level_values(0)
-    logger.info(f"DXY: {len(dxy)} days")
-
-    # US 10Y Treasury Yield
-    us10y = yf.download("^TNX", start=start.isoformat(), end=end.isoformat(), progress=False)
-    if isinstance(us10y.columns, pd.MultiIndex):
-        us10y.columns = us10y.columns.get_level_values(0)
-    logger.info(f"US 10Y: {len(us10y)} days")
-
-    return nifty, india_vix, sp500, us_vix, dxy, us10y
+    return (results["nifty"], results["india_vix"], results["sp500"],
+            results["us_vix"], results["dxy"], results["us10y"])
 
 
 def _build_feature_matrix(nifty: pd.DataFrame, india_vix_df: pd.DataFrame,
@@ -299,7 +305,15 @@ async def run_backfill(db_session) -> dict:
     )
 
     if nifty.empty:
-        return {"error": "Failed to download Nifty data from yfinance"}
+        return {
+            "error": "Failed to download Nifty data from yfinance",
+            "hint": "yfinance may be blocked from this server's IP. Try running backfill locally.",
+            "other_data": {
+                "india_vix": len(india_vix_df),
+                "sp500": len(sp500),
+                "us_vix": len(us_vix_df),
+            },
+        }
 
     # Build full feature matrix
     logger.info("Building feature matrix...")
