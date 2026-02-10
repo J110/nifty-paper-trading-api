@@ -151,7 +151,7 @@ def get_classification_breakdown(pred: float) -> dict:
     zones = [
         {
             "name": "Strong Bull",
-            "range": "> -0.5%",
+            "range": "0.0% to -0.5%",
             "color": "#00E676",
             "active": pred_pct > -0.5,
             "min": -0.5,
@@ -191,10 +191,10 @@ def get_classification_breakdown(pred: float) -> dict:
         },
         {
             "name": "No Trade (Bear)",
-            "range": "< -3.5%",
+            "range": "-3.5% to -8.0%",
             "color": "#EF5350",
             "active": pred_pct <= -3.5,
-            "min": -5.0,
+            "min": -8.0,
             "max": -3.5,
         },
     ]

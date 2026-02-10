@@ -2,11 +2,11 @@
 
 from datetime import date, timedelta
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func, distinct
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
-from db.models import PriceSnapshot, DailyPnl
+from db.models import PriceSnapshot, DailyPnl, Prediction
 from config import ACTIVE_VERSIONS, INITIAL_CAPITAL
 
 router = APIRouter(prefix="/api")
@@ -19,9 +19,8 @@ async def get_nifty_chart(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Nifty OHLC data for charting.
-    For intraday (1d period): returns 5-min snapshots from price_snapshots table.
-    For daily: returns aggregated daily data.
+    Nifty price data for charting.
+    Tries price_snapshots first; falls back to daily prediction spot prices.
     """
     today = date.today()
 
@@ -53,8 +52,7 @@ async def get_nifty_chart(
         return candles
 
     else:
-        # Daily candles — aggregate from snapshots or use stored data
-        # For now, return from snapshots aggregated by day
+        # Try daily candles from price_snapshots
         result = await db.execute(
             select(PriceSnapshot).where(
                 PriceSnapshot.timestamp >= start_date
@@ -62,30 +60,51 @@ async def get_nifty_chart(
         )
         snapshots = result.scalars().all()
 
-        from collections import defaultdict
-        daily = defaultdict(lambda: {"open": None, "high": 0, "low": 999999, "close": 0})
+        if snapshots:
+            from collections import defaultdict
+            daily = defaultdict(lambda: {"open": None, "high": 0, "low": 999999, "close": 0})
+            for s in snapshots:
+                d = s.timestamp.date().isoformat()
+                if daily[d]["open"] is None:
+                    daily[d]["open"] = s.nifty_spot
+                daily[d]["high"] = max(daily[d]["high"], s.nifty_high or s.nifty_spot)
+                daily[d]["low"] = min(daily[d]["low"], s.nifty_low or s.nifty_spot)
+                daily[d]["close"] = s.nifty_spot
 
-        for s in snapshots:
-            d = s.timestamp.date().isoformat()
-            if daily[d]["open"] is None:
-                daily[d]["open"] = s.nifty_spot
-            daily[d]["high"] = max(daily[d]["high"], s.nifty_high or s.nifty_spot)
-            daily[d]["low"] = min(daily[d]["low"], s.nifty_low or s.nifty_spot)
-            daily[d]["close"] = s.nifty_spot
+            candles = []
+            for d in sorted(daily.keys()):
+                data = daily[d]
+                if data["open"] is not None:
+                    candles.append({
+                        "timestamp": d,
+                        "open": data["open"],
+                        "high": data["high"],
+                        "low": data["low"],
+                        "close": data["close"],
+                        "volume": 0,
+                    })
+            return candles
 
+        # Fallback: use nifty_spot from predictions (one per day)
+        result = await db.execute(
+            select(Prediction).where(
+                Prediction.date >= start_date,
+                Prediction.nifty_spot.isnot(None),
+                Prediction.version == ACTIVE_VERSIONS[0],  # One per day
+            ).order_by(Prediction.date)
+        )
+        predictions = result.scalars().all()
         candles = []
-        for d in sorted(daily.keys()):
-            data = daily[d]
-            if data["open"] is not None:
+        for p in predictions:
+            if p.nifty_spot and p.nifty_spot > 0:
                 candles.append({
-                    "timestamp": d,
-                    "open": data["open"],
-                    "high": data["high"],
-                    "low": data["low"],
-                    "close": data["close"],
+                    "timestamp": p.date.isoformat(),
+                    "open": p.nifty_spot,
+                    "high": p.nifty_spot,
+                    "low": p.nifty_spot,
+                    "close": p.nifty_spot,
                     "volume": 0,
                 })
-
         return candles
 
 
