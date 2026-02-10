@@ -1,6 +1,8 @@
 """API routes for chart data."""
 
-from datetime import date, timedelta
+import logging
+from datetime import date, datetime, timedelta
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, desc, func, distinct
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,8 +10,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.database import get_db
 from db.models import PriceSnapshot, DailyPnl, Prediction
 from config import ACTIVE_VERSIONS, INITIAL_CAPITAL
+from core.dhan_client import DhanClient
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
+
+# Shared Dhan client — lazily initialised on first chart request
+_dhan_client: DhanClient | None = None
+
+
+async def _get_dhan() -> DhanClient:
+    """Return a started DhanClient singleton."""
+    global _dhan_client
+    if _dhan_client is None:
+        _dhan_client = DhanClient()
+    await _dhan_client.start()
+    return _dhan_client
+
+
+def _epoch_to_iso_date(ts) -> str:
+    """Convert a Dhan epoch timestamp (seconds) to ISO date string."""
+    try:
+        return datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
+    except (TypeError, ValueError, OSError):
+        return str(ts)
 
 
 @router.get("/chart-data/nifty")
@@ -20,7 +45,11 @@ async def get_nifty_chart(
 ):
     """
     Nifty price data for charting.
-    Tries price_snapshots first; falls back to daily prediction spot prices.
+
+    Priority order:
+      1. price_snapshots table (intraday or daily aggregation)
+      2. Dhan historical API (daily OHLC — works for all periods)
+      3. Prediction nifty_spot fallback (limited to paper-trading period)
     """
     today = date.today()
 
@@ -31,8 +60,9 @@ async def get_nifty_chart(
     days = period_days.get(period, 365)
     start_date = today - timedelta(days=days)
 
+    # ---- Intraday 5-min from DB snapshots ----
     if period == "1d" and interval == "5m":
-        # Intraday from snapshots
+        # Try DB snapshots first
         result = await db.execute(
             select(PriceSnapshot).where(
                 PriceSnapshot.timestamp >= start_date
@@ -40,20 +70,43 @@ async def get_nifty_chart(
         )
         snapshots = result.scalars().all()
 
-        candles = []
-        for s in snapshots:
-            candles.append({
-                "timestamp": s.timestamp.isoformat(),
-                "open": s.nifty_spot,
-                "high": s.nifty_high or s.nifty_spot,
-                "low": s.nifty_low or s.nifty_spot,
-                "close": s.nifty_spot,
-                "volume": 0,
-            })
-        return candles
+        if snapshots:
+            candles = []
+            for s in snapshots:
+                candles.append({
+                    "timestamp": s.timestamp.isoformat(),
+                    "open": s.nifty_spot,
+                    "high": s.nifty_high or s.nifty_spot,
+                    "low": s.nifty_low or s.nifty_spot,
+                    "close": s.nifty_spot,
+                    "volume": 0,
+                })
+            return candles
 
+        # Fallback: Dhan intraday
+        try:
+            dhan = await _get_dhan()
+            candles_raw = await dhan.get_intraday_ohlc(interval="5")
+            if candles_raw:
+                return [
+                    {
+                        "timestamp": _epoch_to_iso_date(c["timestamp"]),
+                        "open": c["open"],
+                        "high": c["high"],
+                        "low": c["low"],
+                        "close": c["close"],
+                        "volume": c.get("volume", 0),
+                    }
+                    for c in candles_raw
+                ]
+        except Exception:
+            logger.exception("Dhan intraday fallback failed")
+
+        return []
+
+    # ---- Daily candles ----
     else:
-        # Try daily candles from price_snapshots
+        # 1. Try price_snapshots (aggregated to daily)
         result = await db.execute(
             select(PriceSnapshot).where(
                 PriceSnapshot.timestamp >= start_date
@@ -86,12 +139,35 @@ async def get_nifty_chart(
                     })
             return candles
 
-        # Fallback: use nifty_spot from predictions (one per day)
+        # 2. Dhan historical daily OHLC (primary fallback — real candle data)
+        try:
+            dhan = await _get_dhan()
+            candles_raw = await dhan.get_historical_ohlc(days=days)
+            if candles_raw:
+                candles = []
+                for c in candles_raw:
+                    candles.append({
+                        "timestamp": _epoch_to_iso_date(c["timestamp"]),
+                        "open": c["open"],
+                        "high": c["high"],
+                        "low": c["low"],
+                        "close": c["close"],
+                        "volume": c.get("volume", 0),
+                    })
+                logger.info(
+                    "Served %d Dhan candles for period=%s (%d days)",
+                    len(candles), period, days,
+                )
+                return candles
+        except Exception:
+            logger.exception("Dhan historical fallback failed for period=%s", period)
+
+        # 3. Last resort: prediction nifty_spot (paper-trading period only)
         result = await db.execute(
             select(Prediction).where(
                 Prediction.date >= start_date,
                 Prediction.nifty_spot.isnot(None),
-                Prediction.version == ACTIVE_VERSIONS[0],  # One per day
+                Prediction.version == ACTIVE_VERSIONS[0],
             ).order_by(Prediction.date)
         )
         predictions = result.scalars().all()
