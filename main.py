@@ -103,5 +103,24 @@ async def root():
             "chart_nifty": "/api/chart-data/nifty",
             "chart_equity": "/api/chart-data/equity/{version}",
             "indicators": "/api/indicators",
+            "trigger": "/api/trigger-prediction (POST)",
         },
+    }
+
+
+@app.post("/api/trigger-prediction")
+async def trigger_prediction():
+    """
+    Manually trigger the daily prediction pipeline.
+    Use this when the scheduler missed (e.g., Render free tier was asleep at 9:20 AM).
+    """
+    from scheduler.jobs import generate_daily_predictions
+    import asyncio
+
+    logger.info("Manual prediction trigger received")
+    # Run in background so the API responds immediately
+    asyncio.create_task(generate_daily_predictions())
+    return {
+        "status": "triggered",
+        "message": "Prediction pipeline started. Check /api/signals/current in ~30 seconds.",
     }
