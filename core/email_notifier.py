@@ -1,0 +1,401 @@
+"""
+Email notifications for trade signals using Resend (free tier: 100 emails/day).
+Sends beautifully formatted HTML emails when trades are ready to execute.
+"""
+
+import logging
+import httpx
+from datetime import datetime
+from config import VERSION_CONFIGS
+
+logger = logging.getLogger(__name__)
+
+# Resend API config (set via env var on Render)
+import os
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "anmol@turings.xyz")
+FROM_EMAIL = "Nifty Trading Bot <onboarding@resend.dev>"  # Free tier uses resend.dev domain
+
+
+def _signal_emoji(signal: str) -> str:
+    """Map signal type to emoji."""
+    return {
+        "bull_full": "\U0001F7E2",      # 🟢
+        "bull_half": "\U0001F7E1",      # 🟡
+        "iron_condor": "\U0001F7E0",    # 🟠
+        "no_trade": "\U0001F534",       # 🔴
+    }.get(signal, "\u26AA")              # ⚪
+
+
+def _format_currency(value: float) -> str:
+    """Format as Indian currency."""
+    if abs(value) >= 100_000:
+        return f"\u20B9{value:,.0f}"
+    return f"\u20B9{value:,.2f}"
+
+
+def _build_trade_html(
+    version: str,
+    signal: dict,
+    trade_result: dict,
+    spot: float,
+    vix: float,
+    prediction: float,
+) -> str:
+    """Build a clean HTML email body for a trade alert."""
+    cfg = VERSION_CONFIGS.get(version, {})
+    version_label = cfg.get("label", version)
+    version_color = cfg.get("color", "#4A90D9")
+    signal_type = signal["signal"]
+    trade_type = trade_result.get("trade_type", signal.get("trade_type", ""))
+    strikes = trade_result.get("strikes", {})
+    emoji = _signal_emoji(signal_type)
+
+    # Build strikes display
+    if trade_type == "bull_put":
+        strikes_html = f"""
+        <tr><td style="color:#8b949e;padding:4px 12px;">Sell Put</td>
+            <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{strikes.get('sell_strike', 'N/A')}</td></tr>
+        <tr><td style="color:#8b949e;padding:4px 12px;">Buy Put</td>
+            <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{strikes.get('buy_strike', 'N/A')}</td></tr>
+        """
+    elif trade_type == "iron_condor":
+        strikes_html = f"""
+        <tr><td style="color:#8b949e;padding:4px 12px;">Sell Put</td>
+            <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{strikes.get('sell_strike', 'N/A')}</td></tr>
+        <tr><td style="color:#8b949e;padding:4px 12px;">Buy Put</td>
+            <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{strikes.get('buy_strike', 'N/A')}</td></tr>
+        <tr><td style="color:#8b949e;padding:4px 12px;">Sell Call</td>
+            <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{strikes.get('ic_call_sell', 'N/A')}</td></tr>
+        <tr><td style="color:#8b949e;padding:4px 12px;">Buy Call</td>
+            <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{strikes.get('ic_call_buy', 'N/A')}</td></tr>
+        """
+    else:
+        strikes_html = ""
+
+    return f"""
+    <div style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;background:#0d1117;border:1px solid #30363d;border-radius:12px;overflow:hidden;">
+
+        <!-- Header -->
+        <div style="background:{version_color};padding:20px 24px;">
+            <h1 style="margin:0;color:#fff;font-size:20px;font-weight:600;">
+                {emoji} Trade Signal — {version_label}
+            </h1>
+            <p style="margin:4px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">
+                {datetime.now().strftime('%d %b %Y, %I:%M %p IST')}
+            </p>
+        </div>
+
+        <!-- Signal Badge -->
+        <div style="padding:20px 24px 0;">
+            <div style="display:inline-block;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px 20px;">
+                <span style="color:#8b949e;font-size:12px;text-transform:uppercase;letter-spacing:1px;">Signal</span>
+                <br/>
+                <span style="color:{version_color};font-size:22px;font-weight:700;text-transform:uppercase;">
+                    {signal_type.replace('_', ' ')}
+                </span>
+            </div>
+        </div>
+
+        <!-- Market Context -->
+        <div style="padding:16px 24px;">
+            <h3 style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 8px;">
+                Market Snapshot
+            </h3>
+            <table style="width:100%;border-collapse:collapse;">
+                <tr>
+                    <td style="color:#8b949e;padding:4px 12px;">Nifty Spot</td>
+                    <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{spot:,.1f}</td>
+                </tr>
+                <tr>
+                    <td style="color:#8b949e;padding:4px 12px;">India VIX</td>
+                    <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{vix:.2f}</td>
+                </tr>
+                <tr>
+                    <td style="color:#8b949e;padding:4px 12px;">Predicted Drawdown</td>
+                    <td style="color:{'#f85149' if prediction < -0.025 else '#ffa657' if prediction < -0.015 else '#3fb950'};padding:4px 12px;font-weight:600;">
+                        {prediction*100:.2f}%
+                    </td>
+                </tr>
+            </table>
+        </div>
+
+        <!-- Trade Details -->
+        <div style="padding:0 24px 16px;">
+            <h3 style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 8px;">
+                Trade Details
+            </h3>
+            <table style="width:100%;border-collapse:collapse;background:#161b22;border-radius:8px;">
+                <tr>
+                    <td style="color:#8b949e;padding:4px 12px;">Strategy</td>
+                    <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{trade_type.replace('_', ' ').title()}</td>
+                </tr>
+                <tr>
+                    <td style="color:#8b949e;padding:4px 12px;">Version</td>
+                    <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{version} ({version_label})</td>
+                </tr>
+                {strikes_html}
+                <tr>
+                    <td style="color:#8b949e;padding:4px 12px;">Lots</td>
+                    <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{trade_result.get('num_lots', 'N/A')}</td>
+                </tr>
+                <tr>
+                    <td style="color:#8b949e;padding:4px 12px;">Credit (per unit)</td>
+                    <td style="color:#3fb950;padding:4px 12px;font-weight:600;">{_format_currency(trade_result.get('credit', 0))}</td>
+                </tr>
+                <tr>
+                    <td style="color:#8b949e;padding:4px 12px;">Total Credit</td>
+                    <td style="color:#3fb950;padding:4px 12px;font-weight:600;">{_format_currency(trade_result.get('total_credit', 0))}</td>
+                </tr>
+                <tr>
+                    <td style="color:#8b949e;padding:4px 12px;">Expiry</td>
+                    <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{trade_result.get('expiry', 'N/A')}</td>
+                </tr>
+                <tr>
+                    <td style="color:#8b949e;padding:4px 12px;">Size Multiplier</td>
+                    <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{signal.get('size_mult', 1.0):.1%}</td>
+                </tr>
+                <tr>
+                    <td style="color:#8b949e;padding:4px 12px;">Entry Mode</td>
+                    <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{trade_result.get('entry_mode', 'normal').title()}</td>
+                </tr>
+            </table>
+        </div>
+
+        <!-- Footer -->
+        <div style="padding:12px 24px 16px;border-top:1px solid #21262d;">
+            <p style="color:#484f58;font-size:11px;margin:0;text-align:center;">
+                Paper Trading Bot &bull; {version} &bull; Auto-generated alert
+            </p>
+        </div>
+    </div>
+    """
+
+
+def _build_no_trade_html(
+    prediction: float,
+    spot: float,
+    vix: float,
+    version_signals: list[dict],
+) -> str:
+    """Build HTML for when all versions produce no_trade."""
+    rows = ""
+    for vs in version_signals:
+        cfg = VERSION_CONFIGS.get(vs["version"], {})
+        rows += f"""
+        <tr>
+            <td style="color:#e6edf3;padding:6px 12px;">{vs['version']} ({cfg.get('label', '')})</td>
+            <td style="color:#f85149;padding:6px 12px;font-weight:600;">NO TRADE</td>
+        </tr>"""
+
+    return f"""
+    <div style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;background:#0d1117;border:1px solid #30363d;border-radius:12px;overflow:hidden;">
+        <div style="background:#f85149;padding:20px 24px;">
+            <h1 style="margin:0;color:#fff;font-size:20px;font-weight:600;">
+                \U0001F534 No Trade Today
+            </h1>
+            <p style="margin:4px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">
+                {datetime.now().strftime('%d %b %Y, %I:%M %p IST')}
+            </p>
+        </div>
+        <div style="padding:20px 24px;">
+            <table style="width:100%;border-collapse:collapse;">
+                <tr><td style="color:#8b949e;padding:4px 12px;">Nifty</td>
+                    <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{spot:,.1f}</td></tr>
+                <tr><td style="color:#8b949e;padding:4px 12px;">VIX</td>
+                    <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{vix:.2f}</td></tr>
+                <tr><td style="color:#8b949e;padding:4px 12px;">Predicted Drawdown</td>
+                    <td style="color:#f85149;padding:4px 12px;font-weight:600;">{prediction*100:.2f}%</td></tr>
+            </table>
+            <h3 style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:16px 0 8px;">
+                All Versions
+            </h3>
+            <table style="width:100%;border-collapse:collapse;background:#161b22;border-radius:8px;">
+                {rows}
+            </table>
+        </div>
+        <div style="padding:12px 24px 16px;border-top:1px solid #21262d;">
+            <p style="color:#484f58;font-size:11px;margin:0;text-align:center;">
+                Model predicts high risk — sitting out today.
+            </p>
+        </div>
+    </div>
+    """
+
+
+def _build_exit_html(
+    version: str,
+    trade_id: str,
+    exit_reason: str,
+    trade_type: str,
+    entry_spot: float,
+    exit_spot: float,
+    realized_pnl: float,
+    pnl_pct: float,
+    sell_strike: float,
+    buy_strike: float,
+) -> str:
+    """Build HTML for a trade exit notification."""
+    cfg = VERSION_CONFIGS.get(version, {})
+    version_label = cfg.get("label", version)
+    is_profit = realized_pnl > 0
+    pnl_color = "#3fb950" if is_profit else "#f85149"
+    header_color = "#3fb950" if is_profit else "#f85149"
+    emoji = "\u2705" if is_profit else "\u274C"
+
+    return f"""
+    <div style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;background:#0d1117;border:1px solid #30363d;border-radius:12px;overflow:hidden;">
+        <div style="background:{header_color};padding:20px 24px;">
+            <h1 style="margin:0;color:#fff;font-size:20px;font-weight:600;">
+                {emoji} Trade Closed — {version_label}
+            </h1>
+            <p style="margin:4px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">
+                {datetime.now().strftime('%d %b %Y, %I:%M %p IST')}
+            </p>
+        </div>
+        <div style="padding:20px 24px;">
+            <table style="width:100%;border-collapse:collapse;background:#161b22;border-radius:8px;">
+                <tr><td style="color:#8b949e;padding:6px 12px;">Trade ID</td>
+                    <td style="color:#e6edf3;padding:6px 12px;font-weight:600;font-size:12px;">{trade_id}</td></tr>
+                <tr><td style="color:#8b949e;padding:6px 12px;">Strategy</td>
+                    <td style="color:#e6edf3;padding:6px 12px;font-weight:600;">{trade_type.replace('_', ' ').title()}</td></tr>
+                <tr><td style="color:#8b949e;padding:6px 12px;">Exit Reason</td>
+                    <td style="color:#e6edf3;padding:6px 12px;font-weight:600;">{exit_reason.replace('_', ' ').title()}</td></tr>
+                <tr><td style="color:#8b949e;padding:6px 12px;">Entry Spot</td>
+                    <td style="color:#e6edf3;padding:6px 12px;font-weight:600;">{entry_spot:,.1f}</td></tr>
+                <tr><td style="color:#8b949e;padding:6px 12px;">Exit Spot</td>
+                    <td style="color:#e6edf3;padding:6px 12px;font-weight:600;">{exit_spot:,.1f}</td></tr>
+                <tr><td style="color:#8b949e;padding:6px 12px;">Strikes</td>
+                    <td style="color:#e6edf3;padding:6px 12px;font-weight:600;">{sell_strike} / {buy_strike}</td></tr>
+                <tr><td style="color:#8b949e;padding:6px 12px;">Realized P&L</td>
+                    <td style="color:{pnl_color};padding:6px 12px;font-weight:700;font-size:16px;">
+                        {'+' if is_profit else ''}{_format_currency(realized_pnl)} ({pnl_pct:+.1f}%)
+                    </td></tr>
+            </table>
+        </div>
+        <div style="padding:12px 24px 16px;border-top:1px solid #21262d;">
+            <p style="color:#484f58;font-size:11px;margin:0;text-align:center;">
+                Paper Trading Bot &bull; {version} &bull; Auto-generated alert
+            </p>
+        </div>
+    </div>
+    """
+
+
+async def send_trade_alert(
+    version: str,
+    signal: dict,
+    trade_result: dict,
+    spot: float,
+    vix: float,
+    prediction: float,
+) -> bool:
+    """
+    Send email alert when a trade is opened.
+    Returns True if sent successfully.
+    """
+    if not RESEND_API_KEY:
+        logger.warning("RESEND_API_KEY not set — skipping email notification")
+        return False
+
+    cfg = VERSION_CONFIGS.get(version, {})
+    signal_type = signal["signal"]
+    emoji = _signal_emoji(signal_type)
+
+    subject = (
+        f"{emoji} {signal_type.replace('_', ' ').upper()} — "
+        f"{version} ({cfg.get('label', '')}) | "
+        f"Nifty {spot:,.0f} | "
+        f"Credit {_format_currency(trade_result.get('total_credit', 0))}"
+    )
+
+    html = _build_trade_html(version, signal, trade_result, spot, vix, prediction)
+
+    return await _send_email(subject, html)
+
+
+async def send_no_trade_alert(
+    prediction: float,
+    spot: float,
+    vix: float,
+    version_signals: list[dict],
+) -> bool:
+    """Send email when all versions produce no_trade signal."""
+    if not RESEND_API_KEY:
+        logger.warning("RESEND_API_KEY not set — skipping email notification")
+        return False
+
+    subject = (
+        f"\U0001F534 NO TRADE TODAY | "
+        f"Nifty {spot:,.0f} | Drawdown {prediction*100:.2f}%"
+    )
+
+    html = _build_no_trade_html(prediction, spot, vix, version_signals)
+    return await _send_email(subject, html)
+
+
+async def send_exit_alert(
+    version: str,
+    trade_id: str,
+    exit_reason: str,
+    trade_type: str,
+    entry_spot: float,
+    exit_spot: float,
+    realized_pnl: float,
+    pnl_pct: float,
+    sell_strike: float,
+    buy_strike: float,
+) -> bool:
+    """Send email when a trade is closed."""
+    if not RESEND_API_KEY:
+        logger.warning("RESEND_API_KEY not set — skipping email notification")
+        return False
+
+    is_profit = realized_pnl > 0
+    emoji = "\u2705" if is_profit else "\u274C"
+    cfg = VERSION_CONFIGS.get(version, {})
+
+    subject = (
+        f"{emoji} TRADE CLOSED — {version} ({cfg.get('label', '')}) | "
+        f"P&L {'+' if is_profit else ''}{_format_currency(realized_pnl)} | "
+        f"{exit_reason.replace('_', ' ').title()}"
+    )
+
+    html = _build_exit_html(
+        version, trade_id, exit_reason, trade_type,
+        entry_spot, exit_spot, realized_pnl, pnl_pct,
+        sell_strike, buy_strike,
+    )
+    return await _send_email(subject, html)
+
+
+async def _send_email(subject: str, html: str) -> bool:
+    """Send email via Resend API."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {RESEND_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "from": FROM_EMAIL,
+                    "to": [NOTIFY_EMAIL],
+                    "subject": subject,
+                    "html": html,
+                },
+                timeout=10,
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                logger.info(f"Email sent successfully: {data.get('id', 'unknown')}")
+                return True
+            else:
+                logger.error(f"Email send failed: {response.status_code} — {response.text}")
+                return False
+
+    except Exception as e:
+        logger.error(f"Email send error: {e}")
+        return False

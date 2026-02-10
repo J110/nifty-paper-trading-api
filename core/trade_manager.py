@@ -173,12 +173,14 @@ class TradeManager:
         }
 
     async def check_exits(self, version: str, spot: float, vix: float,
-                           db: AsyncSession):
+                           db: AsyncSession) -> list[dict]:
         """
         Check all open positions for exit conditions.
         Called every 5 minutes during market hours.
+        Returns list of closed trade dicts (for email notifications).
         """
         cfg = VERSION_CONFIGS.get(version, {})
+        closed_trades = []
 
         result = await db.execute(
             select(Trade).where(
@@ -192,10 +194,14 @@ class TradeManager:
             exit_reason = await self._check_single_exit(trade, spot, vix, cfg)
 
             if exit_reason:
-                await self._close_trade(trade, spot, exit_reason, db)
+                closed_info = await self._close_trade(trade, spot, exit_reason, db)
+                if closed_info:
+                    closed_trades.append(closed_info)
             else:
                 # Update current PnL
                 await self._update_trade_pnl(trade, spot, vix, db)
+
+        return closed_trades
 
     async def _check_single_exit(self, trade: Trade, spot: float,
                                   vix: float, cfg: dict) -> Optional[str]:
@@ -261,8 +267,8 @@ class TradeManager:
         return None
 
     async def _close_trade(self, trade: Trade, spot: float,
-                            exit_reason: str, db: AsyncSession):
-        """Close a trade and record final PnL."""
+                            exit_reason: str, db: AsyncSession) -> Optional[dict]:
+        """Close a trade and record final PnL. Returns trade info dict for notifications."""
         now = datetime.now()
 
         # Compute final PnL
@@ -278,6 +284,11 @@ class TradeManager:
         realized_pnl = (trade.credit_received - current_value) * \
                         trade.num_lots * NIFTY_LOT_SIZE
 
+        pnl_pct = (
+            realized_pnl / trade.capital_deployed * 100
+            if trade.capital_deployed > 0 else 0
+        )
+
         trade.status = "closed"
         trade.exit_date = date.today()
         trade.exit_time = now
@@ -285,10 +296,7 @@ class TradeManager:
         trade.exit_reason = exit_reason
         trade.realized_pnl = realized_pnl
         trade.current_pnl = realized_pnl
-        trade.current_pnl_pct = (
-            realized_pnl / trade.capital_deployed * 100
-            if trade.capital_deployed > 0 else 0
-        )
+        trade.current_pnl_pct = pnl_pct
         trade.updated_at = now
 
         await db.commit()
@@ -296,6 +304,18 @@ class TradeManager:
             f"[{trade.version}] Closed {trade.trade_id}: "
             f"reason={exit_reason}, pnl={realized_pnl:.0f}"
         )
+
+        # Return trade info for email notifications
+        return {
+            "trade_id": trade.trade_id,
+            "exit_reason": exit_reason,
+            "trade_type": trade.trade_type,
+            "entry_spot": trade.entry_spot,
+            "realized_pnl": realized_pnl,
+            "pnl_pct": pnl_pct,
+            "sell_strike": trade.sell_strike,
+            "buy_strike": trade.buy_strike,
+        }
 
     async def _update_trade_pnl(self, trade: Trade, spot: float,
                                  vix: float, db: AsyncSession):

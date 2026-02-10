@@ -16,6 +16,7 @@ from core.signal_mapper import map_signal, get_classification_breakdown
 from core.feature_engine import build_live_features
 from core.trade_manager import TradeManager
 from core.price_tracker import PriceTracker
+from core.email_notifier import send_trade_alert, send_no_trade_alert, send_exit_alert
 from config import (
     ACTIVE_VERSIONS, VERSION_CONFIGS, INITIAL_CAPITAL,
     DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH,
@@ -115,9 +116,10 @@ async def generate_daily_predictions():
     2. Build feature vector
     3. Run model prediction
     4. Map prediction to signal for each version
-    5. If signal != no_trade: open paper trade
+    5. If signal != no_trade: open paper trade + send email alert
     6. Schedule delay price recordings
     7. Store prediction + features in DB
+    8. If all versions = no_trade: send no-trade email
     """
     logger.info("=== Starting daily prediction pipeline ===")
 
@@ -177,6 +179,10 @@ async def generate_daily_predictions():
         prediction_value = model_runner.predict(features)
         logger.info(f"Model prediction: {prediction_value:.4f} ({prediction_value*100:.2f}%)")
 
+        # Track trades opened and all signals (for no-trade email)
+        trades_opened = []
+        all_version_signals = []
+
         # Store in DB
         async with async_session_factory() as db:
             # Store features
@@ -200,6 +206,12 @@ async def generate_daily_predictions():
             for version in ACTIVE_VERSIONS:
                 cfg = VERSION_CONFIGS[version]
                 signal = map_signal(prediction_value, cfg)
+
+                # Track for no-trade check
+                all_version_signals.append({
+                    "version": version,
+                    "signal": signal["signal"],
+                })
 
                 # Compute confidence score (distance from nearest boundary)
                 breakdown = get_classification_breakdown(prediction_value)
@@ -249,7 +261,36 @@ async def generate_daily_predictions():
                             f"[{version}] Opened trade: {trade_result['trade_id']}"
                         )
 
+                        # ===== EMAIL: Trade opened =====
+                        trades_opened.append((version, signal, trade_result))
+
             await db.commit()
+
+        # ===== Send email notifications (outside DB transaction) =====
+        if trades_opened:
+            for version, signal, trade_result in trades_opened:
+                try:
+                    await send_trade_alert(
+                        version=version,
+                        signal=signal,
+                        trade_result=trade_result,
+                        spot=spot,
+                        vix=vix,
+                        prediction=prediction_value,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send trade alert email for {version}: {e}")
+        else:
+            # All versions produced no_trade — send daily no-trade summary
+            try:
+                await send_no_trade_alert(
+                    prediction=prediction_value,
+                    spot=spot,
+                    vix=vix,
+                    version_signals=all_version_signals,
+                )
+            except Exception as e:
+                logger.error(f"Failed to send no-trade alert email: {e}")
 
         logger.info("=== Daily prediction pipeline complete ===")
 
@@ -268,7 +309,30 @@ async def check_all_exits():
 
         async with async_session_factory() as db:
             for version in ACTIVE_VERSIONS:
-                await trade_manager.check_exits(version, spot, vix, db)
+                closed_trades = await trade_manager.check_exits(
+                    version, spot, vix, db
+                )
+
+                # ===== EMAIL: Trade closed =====
+                if closed_trades:
+                    for ct in closed_trades:
+                        try:
+                            await send_exit_alert(
+                                version=version,
+                                trade_id=ct["trade_id"],
+                                exit_reason=ct["exit_reason"],
+                                trade_type=ct["trade_type"],
+                                entry_spot=ct["entry_spot"],
+                                exit_spot=spot,
+                                realized_pnl=ct["realized_pnl"],
+                                pnl_pct=ct["pnl_pct"],
+                                sell_strike=ct["sell_strike"],
+                                buy_strike=ct["buy_strike"],
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to send exit alert for {ct['trade_id']}: {e}"
+                            )
 
     except Exception as e:
         logger.error(f"Exit check failed: {e}")
@@ -289,7 +353,30 @@ async def eod_processing():
         async with async_session_factory() as db:
             for version in ACTIVE_VERSIONS:
                 # Final exit check
-                await trade_manager.check_exits(version, spot, vix, db)
+                closed_trades = await trade_manager.check_exits(
+                    version, spot, vix, db
+                )
+
+                # Send exit emails for EOD closures too
+                if closed_trades:
+                    for ct in closed_trades:
+                        try:
+                            await send_exit_alert(
+                                version=version,
+                                trade_id=ct["trade_id"],
+                                exit_reason=ct["exit_reason"],
+                                trade_type=ct["trade_type"],
+                                entry_spot=ct["entry_spot"],
+                                exit_spot=spot,
+                                realized_pnl=ct["realized_pnl"],
+                                pnl_pct=ct["pnl_pct"],
+                                sell_strike=ct["sell_strike"],
+                                buy_strike=ct["buy_strike"],
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to send EOD exit alert for {ct['trade_id']}: {e}"
+                            )
 
                 # Get portfolio state
                 portfolio = await trade_manager.get_portfolio_state(version, db)

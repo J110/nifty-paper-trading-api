@@ -33,6 +33,10 @@ DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN", "")
 DHAN_CLIENT_ID = os.environ.get("DHAN_CLIENT_ID", "")
 DHAN_API_BASE = "https://api.dhan.co/v2"
 
+# Email notifications via Resend (free tier: 100 emails/day)
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "anmol@turings.xyz")
+
 # Dhan security IDs
 DHAN_NIFTY_SECURITY_ID = "13"
 DHAN_VIX_SECURITY_ID = "26"
