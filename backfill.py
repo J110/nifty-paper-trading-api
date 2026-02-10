@@ -2,18 +2,28 @@
 Historical backfill script — populates the database with predictions and trades
 from Jan 1, 2026 to today by running the ML model against historical Nifty data.
 
-CRITICAL: Features must match the exact 37 training feature names and computation
-from nifty_options_model/src/feature_engineering.py.
+Uses shared/feature_compute.py — the single source of truth for feature computation.
+Features are loaded from merged_daily.parquet (same as backtest and live system).
 
 Usage: Called via POST /api/backfill endpoint on Render.
 """
 
 import logging
+import os
 import math
 import numpy as np
 import pandas as pd
-import ta as ta_lib
 from datetime import date, datetime, timedelta
+
+import sys
+BACKEND_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BACKEND_ROOT)
+
+from shared.feature_compute import (
+    compute_features_for_date,
+    load_dhan_options_features,
+    BASE_FEATURE_COLS,
+)
 
 from core.timezone import today_ist
 from db.models import Prediction, Trade, DailyPnl, DailyFeature
@@ -38,242 +48,18 @@ logger = logging.getLogger(__name__)
 
 BACKFILL_START = date(2026, 1, 1)
 
+# Paths to the ground truth data (shipped in backend/data/)
+MERGED_DAILY_PATH = os.path.join(BACKEND_ROOT, "data", "merged_daily.parquet")
+DHAN_RAW_PATH = os.path.join(BACKEND_ROOT, "data", "dhan_raw_options.parquet")
+DHAN_SKEW_PATH = os.path.join(BACKEND_ROOT, "data", "daily_iv_skew_params.parquet")
 
-# ── helpers ──────────────────────────────────────────────────────────
-
-def _get_last_thursday(year: int, month: int) -> date:
-    """Get the last Thursday of a given month (monthly expiry)."""
-    if month == 12:
-        next_month_first = date(year + 1, 1, 1)
-    else:
-        next_month_first = date(year, month + 1, 1)
-    last_day = next_month_first - timedelta(days=1)
-    # Walk back to Thursday (weekday 3)
-    offset = (last_day.weekday() - 3) % 7
-    return last_day - timedelta(days=offset)
-
-
-def _get_monthly_expiries(start: date, end: date) -> list:
-    """Generate list of monthly expiry dates (last Thursday) in range."""
-    expiries = []
-    y, m = start.year, start.month
-    while True:
-        exp = _get_last_thursday(y, m)
-        if exp > end:
-            break
-        if exp >= start:
-            expiries.append(exp)
-        m += 1
-        if m > 12:
-            m = 1
-            y += 1
-    return expiries
-
-
-def _safe_yf_download(ticker: str, start: str, end: str, retries: int = 3) -> pd.DataFrame:
-    """Download a single ticker from yfinance with retries."""
-    import yfinance as yf
-    import time
-
-    for attempt in range(retries):
-        try:
-            data = yf.download(ticker, start=start, end=end, progress=False)
-            if isinstance(data.columns, pd.MultiIndex):
-                data.columns = data.columns.get_level_values(0)
-            if not data.empty:
-                logger.info(f"  {ticker}: {len(data)} days (attempt {attempt + 1})")
-                return data
-            logger.warning(f"  {ticker}: empty response (attempt {attempt + 1})")
-        except Exception as e:
-            logger.warning(f"  {ticker}: error on attempt {attempt + 1}: {e}")
-
-        if attempt < retries - 1:
-            time.sleep(2 * (attempt + 1))  # increasing delay between retries
-
-    logger.error(f"  {ticker}: all {retries} attempts failed, returning empty DataFrame")
-    return pd.DataFrame()
-
-
-def _download_market_data(start: date, end: date):
-    """
-    Download all market data needed for the 37 training features:
-    Nifty, India VIX, S&P 500, US VIX, DXY, US 10Y Treasury.
-    Downloads each ticker with retries and delay to avoid rate limiting.
-    Returns aligned DataFrames.
-    """
-    import time
-
-    start_str = start.isoformat()
-    end_str = end.isoformat()
-    logger.info(f"Downloading market data from {start} to {end}")
-
-    tickers = {
-        "nifty": "^NSEI",
-        "india_vix": "^INDIAVIX",
-        "sp500": "^GSPC",
-        "us_vix": "^VIX",
-        "dxy": "DX-Y.NYB",
-        "us10y": "^TNX",
-    }
-
-    results = {}
-    for name, ticker in tickers.items():
-        results[name] = _safe_yf_download(ticker, start_str, end_str)
-        time.sleep(1)  # small delay between downloads to avoid rate limiting
-
-    return (results["nifty"], results["india_vix"], results["sp500"],
-            results["us_vix"], results["dxy"], results["us10y"])
-
-
-def _build_feature_matrix(nifty: pd.DataFrame, india_vix_df: pd.DataFrame,
-                           sp500: pd.DataFrame, us_vix_df: pd.DataFrame,
-                           dxy: pd.DataFrame, us10y: pd.DataFrame) -> pd.DataFrame:
-    """
-    Build the full feature matrix matching the exact 37 training features.
-    Returns DataFrame indexed by date with columns matching feature_names.json.
-    """
-    # Work with Nifty as the base index
-    df = pd.DataFrame(index=nifty.index)
-    close = nifty["Close"]
-    high = nifty["High"]
-
-    # ── 1. Trend & Momentum ─────────────────────────────────────────
-    df["nifty_return_5d"] = close.pct_change(5)
-    df["nifty_return_10d"] = close.pct_change(10)
-    df["nifty_return_20d"] = close.pct_change(20)
-
-    sma50 = close.rolling(50).mean()
-    sma200 = close.rolling(200).mean()
-    df["nifty_distance_50dma"] = (close - sma50) / sma50 * 100
-    df["nifty_distance_200dma"] = (close - sma200) / sma200 * 100
-    df["golden_cross"] = (sma50 > sma200).astype(int)
-
-    rsi = ta_lib.momentum.RSIIndicator(close, window=14)
-    df["rsi_14"] = rsi.rsi()
-
-    # Higher highs over 5 weeks
-    weekly_high = high.resample("W").max()
-    weekly_hh = (weekly_high > weekly_high.shift(1)).astype(int)
-    weekly_hh_count = weekly_hh.rolling(5, min_periods=1).sum()
-    df["higher_highs_5w"] = weekly_hh_count.reindex(df.index, method="ffill").fillna(0)
-
-    # ── 2. Volatility ───────────────────────────────────────────────
-    # Align India VIX to Nifty dates
-    vix_close = india_vix_df["Close"].reindex(df.index).ffill().fillna(14.0)
-    df["india_vix"] = vix_close
-
-    df["vix_change_5d"] = vix_close - vix_close.shift(5)
-
-    # VIX percentile over 252 days
-    df["vix_percentile_252d"] = vix_close.rolling(252, min_periods=60).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    )
-
-    # Realized volatility (annualized, in percentage)
-    log_returns = np.log(close / close.shift(1))
-    df["realized_vol_20d"] = log_returns.rolling(20).std() * np.sqrt(252) * 100
-
-    # Variance risk premium
-    df["variance_risk_premium"] = df["india_vix"] - df["realized_vol_20d"]
-
-    # VIX rising streak
-    vix_rising = (vix_close > vix_close.shift(1)).astype(int)
-    vix_streak = pd.Series(0, index=df.index, dtype=int)
-    for i in range(1, len(df)):
-        if vix_rising.iloc[i] == 1:
-            vix_streak.iloc[i] = vix_streak.iloc[i - 1] + 1
-        else:
-            vix_streak.iloc[i] = 0
-    df["vix_rising_streak"] = vix_streak
-
-    # ── 3. Sentiment ────────────────────────────────────────────────
-    df["pcr_proxy"] = df["vix_change_5d"] / (df["nifty_return_5d"] * 100 + 0.001)
-
-    # ── 4. Global context ───────────────────────────────────────────
-    # S&P 500
-    sp_close = sp500["Close"].reindex(df.index).ffill() if len(sp500) > 0 else pd.Series(0, index=df.index)
-    if sp_close.notna().sum() >= 100:
-        df["sp500_return_5d"] = sp_close.pct_change(5)
-    else:
-        df["sp500_return_5d"] = 0.0
-
-    # US VIX
-    usvix_close = us_vix_df["Close"].reindex(df.index).ffill() if len(us_vix_df) > 0 else pd.Series(0, index=df.index)
-    df["us_vix"] = usvix_close.fillna(0)
-    if usvix_close.notna().sum() >= 100:
-        df["us_vix_change_5d"] = usvix_close - usvix_close.shift(5)
-    else:
-        df["us_vix_change_5d"] = 0.0
-
-    # DXY
-    dxy_close = dxy["Close"].reindex(df.index).ffill() if len(dxy) > 0 else pd.Series(0, index=df.index)
-    df["dxy_level"] = dxy_close.fillna(0)
-    if dxy_close.notna().sum() >= 100:
-        df["dxy_change_5d"] = dxy_close - dxy_close.shift(5)
-    else:
-        df["dxy_change_5d"] = 0.0
-
-    # US 10Y Treasury
-    us10y_close = us10y["Close"].reindex(df.index).ffill() if len(us10y) > 0 else pd.Series(0, index=df.index)
-    df["us10y_level"] = us10y_close.fillna(0)
-    if us10y_close.notna().sum() >= 100:
-        df["us10y_change_5d"] = us10y_close - us10y_close.shift(5)
-        df["us10y_change_20d"] = us10y_close - us10y_close.shift(20)
-    else:
-        df["us10y_change_5d"] = 0.0
-        df["us10y_change_20d"] = 0.0
-
-    # ── 5. Calendar ─────────────────────────────────────────────────
-    df["day_of_month"] = df.index.day
-    df["month"] = df.index.month
-    df["is_volatile_month"] = df["month"].isin([9, 10]).astype(int)
-
-    # Monthly expiry features
-    first_date = df.index[0].date() if hasattr(df.index[0], 'date') else df.index[0]
-    last_date = df.index[-1].date() if hasattr(df.index[-1], 'date') else df.index[-1]
-    expiries = _get_monthly_expiries(first_date, last_date + timedelta(days=60))
-    trading_dates = df.index.date if hasattr(df.index[0], 'date') else df.index
-
-    days_to_expiry_list = []
-    is_expiry_week_list = []
-    for d in df.index:
-        d_date = d.date() if hasattr(d, 'date') else d
-        next_exp = None
-        for exp in expiries:
-            if exp >= d_date:
-                next_exp = exp
-                break
-        if next_exp is not None:
-            # Count trading days between d and expiry
-            mask = [td for td in trading_dates if d_date <= td <= next_exp]
-            dte = len(mask)
-            days_to_expiry_list.append(dte)
-            is_expiry_week_list.append(1 if dte <= 5 else 0)
-        else:
-            days_to_expiry_list.append(30)
-            is_expiry_week_list.append(0)
-
-    df["is_expiry_week"] = is_expiry_week_list
-    df["days_to_monthly_expiry"] = days_to_expiry_list
-
-    # ── 6. Options-derived (placeholders — no historical option chain) ──
-    df["deep_otm_oi_ratio"] = 0.0
-    df["deep_otm_oi_ratio_change_5d"] = 0.0
-    df["put_oi_buildup_ratio"] = 0.0
-    df["put_volume_surge_ratio"] = 1.0
-    df["iv_skew_steepness"] = 0.0
-    df["iv_skew_change_5d"] = 0.0
-    df["atm_iv"] = df["india_vix"] / 100.0  # rough proxy
-    df["atm_iv_percentile_252d"] = df["vix_percentile_252d"]  # same proxy
-    df["atm_put_intraday_range"] = 0.0
-
-    # ── Clean up ────────────────────────────────────────────────────
-    df = df.fillna(0.0)
-
-    # Replace inf/-inf
-    df = df.replace([np.inf, -np.inf], 0.0)
-
-    return df
+# The 37 training feature names
+TRAINING_FEATURES = BASE_FEATURE_COLS + [
+    "deep_otm_oi_ratio", "deep_otm_oi_ratio_change_5d",
+    "put_oi_buildup_ratio", "put_volume_surge_ratio",
+    "iv_skew_steepness", "iv_skew_change_5d", "atm_iv",
+    "atm_iv_percentile_252d", "atm_put_intraday_range",
+]
 
 
 # ── main backfill ────────────────────────────────────────────────────
@@ -297,57 +83,45 @@ async def run_backfill(db_session) -> dict:
     await db_session.commit()
     logger.info("Existing data cleared")
 
-    # Download historical data (need extra history for feature computation: 200-day MA, 252-day VIX)
-    start_download = date(2025, 1, 1)  # ~1 year before backfill start for warmup
-    end_download = today_ist()
-
-    nifty, india_vix_df, sp500, us_vix_df, dxy, us10y = _download_market_data(
-        start_download, end_download
-    )
-
-    if nifty.empty:
+    # Load ground truth data from merged_daily.parquet (same source as backtest)
+    if not os.path.exists(MERGED_DAILY_PATH):
         return {
-            "error": "Failed to download Nifty data from yfinance",
-            "hint": "yfinance may be blocked from this server's IP. Try running backfill locally.",
-            "other_data": {
-                "india_vix": len(india_vix_df),
-                "sp500": len(sp500),
-                "us_vix": len(us_vix_df),
-            },
+            "error": f"merged_daily.parquet not found at {MERGED_DAILY_PATH}",
+            "hint": "Run data_collection.py to create it, or deploy with the data.",
         }
 
-    # Build full feature matrix
-    logger.info("Building feature matrix...")
-    feature_df = _build_feature_matrix(nifty, india_vix_df, sp500, us_vix_df, dxy, us10y)
-    logger.info(f"Feature matrix: {feature_df.shape}")
+    merged_daily = pd.read_parquet(MERGED_DAILY_PATH)
+    logger.info(f"Loaded merged_daily: {len(merged_daily)} rows, "
+                f"last date: {merged_daily.index[-1].date()}")
 
-    # The 37 training feature names (order matters for model prediction)
-    TRAINING_FEATURES = [
-        "nifty_return_5d", "nifty_return_10d", "nifty_return_20d",
-        "nifty_distance_50dma", "nifty_distance_200dma", "golden_cross",
-        "rsi_14", "higher_highs_5w", "india_vix", "vix_change_5d",
-        "vix_percentile_252d", "realized_vol_20d", "variance_risk_premium",
-        "vix_rising_streak", "pcr_proxy", "sp500_return_5d", "us_vix",
-        "us_vix_change_5d", "dxy_level", "dxy_change_5d", "us10y_level",
-        "us10y_change_5d", "us10y_change_20d", "day_of_month", "month",
-        "is_expiry_week", "days_to_monthly_expiry", "is_volatile_month",
-        "deep_otm_oi_ratio", "deep_otm_oi_ratio_change_5d",
-        "put_oi_buildup_ratio", "put_volume_surge_ratio",
-        "iv_skew_steepness", "iv_skew_change_5d", "atm_iv",
-        "atm_iv_percentile_252d", "atm_put_intraday_range",
-    ]
+    # Load Dhan features if available
+    dhan_features = None
+    if os.path.exists(DHAN_RAW_PATH) and os.path.exists(DHAN_SKEW_PATH):
+        dhan_features = load_dhan_options_features(DHAN_RAW_PATH, DHAN_SKEW_PATH)
+        if dhan_features is not None:
+            logger.info(f"Loaded Dhan features: {len(dhan_features)} days")
+
+    # Pre-compute features for all backfill dates using the shared module
+    logger.info("Computing features for backfill dates using shared module...")
+    backfill_dates = [d for d in merged_daily.index if d.date() >= BACKFILL_START]
+    feature_cache = {}
+    for d in backfill_dates:
+        features = compute_features_for_date(
+            merged_daily, d, dhan_features,
+            data_start="2014-01-01", data_end="2026-12-31",
+        )
+        if features is not None:
+            feature_cache[d] = features
+    logger.info(f"Computed features for {len(feature_cache)} trading days")
 
     # Load model
     model_runner = ModelRunner(DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH)
     if model_runner.model is None:
         return {"error": "Model not loaded"}
 
-    # Filter to trading days from BACKFILL_START onwards
-    nifty_close = nifty["Close"]
-    nifty_dates = nifty.index
-    backfill_dates = [d for d in nifty_dates if d.date() >= BACKFILL_START]
-
-    logger.info(f"Backfilling {len(backfill_dates)} trading days from {BACKFILL_START}")
+    # Filter to trading days that have features
+    backfill_dates_with_features = sorted(feature_cache.keys())
+    logger.info(f"Backfilling {len(backfill_dates_with_features)} trading days from {BACKFILL_START}")
 
     # Track per-version state
     version_state = {}
@@ -365,24 +139,16 @@ async def run_backfill(db_session) -> dict:
         "trades_closed": 0,
     }
 
-    for ts in backfill_dates:
+    for ts in backfill_dates_with_features:
         trade_date = ts.date() if hasattr(ts, 'date') else ts
 
-        # Check feature row exists
-        if ts not in feature_df.index:
-            continue
+        features = feature_cache[ts]
 
-        spot = float(nifty_close.loc[ts])
-        vix = float(feature_df.loc[ts, "india_vix"])
+        spot = float(merged_daily.loc[ts, 'nifty_close'])
+        vix = features["india_vix"]
 
         if pd.isna(spot) or spot <= 0:
             continue
-
-        # Build feature dict from feature matrix (exact 37 training features)
-        features = {}
-        for col in TRAINING_FEATURES:
-            val = feature_df.loc[ts, col] if col in feature_df.columns else 0.0
-            features[col] = float(val) if not (pd.isna(val)) else 0.0
 
         # Run model prediction
         prediction_value = model_runner.predict(features)
@@ -452,30 +218,51 @@ async def run_backfill(db_session) -> dict:
 
                 exit_reason = None
 
-                # Expiry exit
+                # 1. Expiry exit
                 if dte <= cfg.get("MIN_DTE_EXIT", 1):
                     exit_reason = "expiry"
 
-                # Profit target
-                entry_dte = (ot["expiry"] - ot["entry_date"]).days
-                elapsed_pct = 1 - (dte / max(entry_dte, 1))
-                if elapsed_pct < 0.4:
-                    pt = cfg.get("PROFIT_TARGET_EARLY", 0.50)
-                elif elapsed_pct < 0.7:
-                    pt = cfg.get("PROFIT_TARGET_MID", 0.65)
-                else:
-                    pt = cfg.get("PROFIT_TARGET_LATE", 0.80)
+                # 2. Profit target — day-count stages matching backtest
+                if not exit_reason:
+                    days_held = (trade_date - ot["entry_date"]).days
+                    if days_held <= 3:
+                        pt = cfg.get("PROFIT_TARGET_EARLY", 0.50)
+                    elif days_held <= 7:
+                        pt = cfg.get("PROFIT_TARGET_MID", 0.65)
+                    else:
+                        pt = cfg.get("PROFIT_TARGET_LATE", 0.80)
 
-                if pnl_pct >= pt:
-                    exit_reason = "profit_target"
+                    if pnl_pct >= pt:
+                        exit_reason = "profit_target"
 
-                # Stop loss
-                sl_mult = cfg.get("STOP_LOSS_MULTIPLIER", 3.0)
-                if ot["trade_type"] == "iron_condor":
-                    sl_mult = cfg.get("IC_STOP_LOSS_MULTIPLIER", 3.0)
-                max_loss = ot["credit"] * sl_mult
-                if current_value >= max_loss + ot["credit"]:
-                    exit_reason = "stop_loss"
+                # 3. Trailing stop — track peak PnL per trade
+                if not exit_reason:
+                    trailing_activate = cfg.get("TRAILING_STOP_ACTIVATE", 0.40)
+                    trailing_level = cfg.get("TRAILING_STOP_LEVEL", 0.10)
+
+                    if pnl_pct >= trailing_activate:
+                        peak = ot.get("peak_pnl_pct", 0.0)
+                        if peak > 0 and pnl_pct < peak - trailing_level:
+                            exit_reason = "trailing_stop"
+                        ot["peak_pnl_pct"] = max(peak, pnl_pct)
+
+                # 4. Stop loss — with N-day confirmation matching backtest
+                if not exit_reason:
+                    sl_mult = cfg.get("STOP_LOSS_MULTIPLIER", 3.0)
+                    if ot["trade_type"] == "iron_condor":
+                        sl_mult = cfg.get("IC_STOP_LOSS_MULTIPLIER", 3.0)
+
+                    confirm_days = cfg.get("STOP_LOSS_CONFIRM_DAYS", 1)
+                    if ot["trade_type"] == "iron_condor":
+                        confirm_days = cfg.get("IC_STOP_LOSS_CONFIRM_DAYS", 1)
+
+                    max_loss = ot["credit"] * sl_mult
+                    if current_value >= max_loss + ot["credit"]:
+                        ot["stop_loss_breach_days"] = ot.get("stop_loss_breach_days", 0) + 1
+                        if ot["stop_loss_breach_days"] >= confirm_days:
+                            exit_reason = "stop_loss"
+                    else:
+                        ot["stop_loss_breach_days"] = 0
 
                 if exit_reason:
                     realized_pnl = pnl_per_unit * ot["num_lots"] * NIFTY_LOT_SIZE
@@ -544,13 +331,13 @@ async def run_backfill(db_session) -> dict:
                     if trade_type == "bull_put":
                         credit = price_bull_put_spread(
                             spot, strikes["sell_strike"], strikes["buy_strike"],
-                            T, RISK_FREE_RATE, sigma,
+                            T, RISK_FREE_RATE, sigma, apply_slippage=True,
                         )
                     else:
                         credit = price_iron_condor(
                             spot, strikes["sell_strike"], strikes["buy_strike"],
                             strikes["ic_call_sell"], strikes["ic_call_buy"],
-                            T, RISK_FREE_RATE, sigma,
+                            T, RISK_FREE_RATE, sigma, apply_slippage=True,
                         )
 
                     pos_pct = cfg.get("POSITION_SIZE_PCT", 0.20)
@@ -592,6 +379,8 @@ async def run_backfill(db_session) -> dict:
                         position_size_pct=effective_pct,
                         graduated_mult=size_mult,
                         capital_deployed=capital_deployed,
+                        stop_loss_breach_days=0,
+                        peak_pnl_pct=0.0,
                     )
                     db_session.add(trade)
 
@@ -607,6 +396,8 @@ async def run_backfill(db_session) -> dict:
                         "credit": credit,
                         "num_lots": num_lots,
                         "capital_deployed": capital_deployed,
+                        "peak_pnl_pct": 0.0,
+                        "stop_loss_breach_days": 0,
                     })
                     stats["trades_opened"] += 1
 

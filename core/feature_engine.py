@@ -1,37 +1,47 @@
 """
-Build the same feature vector as the backtest model, but from live data.
+Build features for live predictions using the SAME code as the backtest.
 
-CRITICAL: Features must EXACTLY match the 37 training features.
-The model expects specific column names in specific order.
-Feature names are loaded from ml/feature_names.pkl.
+Delegates to shared/feature_compute.py — the single source of truth.
+This file handles data loading, the Dhan live option chain overlay,
+and display formatting. Feature computation itself lives in the shared module.
 """
 
 import logging
+import os
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta, date
+from datetime import timedelta
 from typing import Optional
-from core.timezone import now_ist
 
 logger = logging.getLogger(__name__)
 
-# The 37 training feature names — MUST match feature_names.json / feature_names.pkl
-TRAINING_FEATURES = [
-    "nifty_return_5d", "nifty_return_10d", "nifty_return_20d",
-    "nifty_distance_50dma", "nifty_distance_200dma", "golden_cross",
-    "rsi_14", "higher_highs_5w", "india_vix", "vix_change_5d",
-    "vix_percentile_252d", "realized_vol_20d", "variance_risk_premium",
-    "vix_rising_streak", "pcr_proxy", "sp500_return_5d", "us_vix",
-    "us_vix_change_5d", "dxy_level", "dxy_change_5d", "us10y_level",
-    "us10y_change_5d", "us10y_change_20d", "day_of_month", "month",
-    "is_expiry_week", "days_to_monthly_expiry", "is_volatile_month",
+# BACKEND_ROOT = directory containing core/, shared/, data/, ml/
+# Locally: /Users/.../Options Trading/backend
+# In Docker: /app
+import sys
+BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BACKEND_ROOT)
+
+from shared.feature_compute import (
+    compute_features_for_date,
+    load_dhan_options_features,
+    BASE_FEATURE_COLS,
+)
+
+# Path to parquet data files (shipped in backend/data/)
+MERGED_DAILY_PATH = os.path.join(BACKEND_ROOT, "data", "merged_daily.parquet")
+DHAN_RAW_PATH = os.path.join(BACKEND_ROOT, "data", "dhan_raw_options.parquet")
+DHAN_SKEW_PATH = os.path.join(BACKEND_ROOT, "data", "daily_iv_skew_params.parquet")
+
+# The 37 training feature names — kept for reference / display code
+TRAINING_FEATURES = BASE_FEATURE_COLS + [
     "deep_otm_oi_ratio", "deep_otm_oi_ratio_change_5d",
     "put_oi_buildup_ratio", "put_volume_surge_ratio",
     "iv_skew_steepness", "iv_skew_change_5d", "atm_iv",
     "atm_iv_percentile_252d", "atm_put_intraday_range",
 ]
 
-# Display features — shown on the Market Signals page with explanations
+# Display features — shown on the Market Signals page
 DISPLAY_FEATURES = {
     "india_vix": {
         "label": "India VIX",
@@ -106,17 +116,6 @@ DISPLAY_FEATURES = {
 }
 
 
-def _get_last_thursday(year: int, month: int) -> date:
-    """Get the last Thursday of a given month (monthly expiry)."""
-    if month == 12:
-        next_month_first = date(year + 1, 1, 1)
-    else:
-        next_month_first = date(year, month + 1, 1)
-    last_day = next_month_first - timedelta(days=1)
-    offset = (last_day.weekday() - 3) % 7
-    return last_day - timedelta(days=offset)
-
-
 def _classify_indicator(name: str, value: float) -> str:
     """Classify an indicator as bullish/bearish/neutral for display."""
     rules = {
@@ -148,287 +147,72 @@ def _classify_indicator(name: str, value: float) -> str:
 async def build_live_features(dhan_client, historical_df: pd.DataFrame,
                                option_chain: Optional[dict] = None) -> dict:
     """
-    Build feature vector for today using live + historical data.
-    Returns dict with all 37 training features matching model input.
+    Build feature vector for today using the shared backtest feature code.
+
+    Loads merged_daily.parquet (which must be kept up-to-date by the data
+    collection pipeline) and calls compute_features_for_date() from the
+    shared module — the EXACT same code that produced the backtest results.
 
     Args:
-        dhan_client: DhanClient instance for live data
-        historical_df: DataFrame with [date, open, high, low, close, volume]
-                       for at least 250 trading days back
-        option_chain: Optional pre-fetched option chain data
+        dhan_client: DhanClient instance (used for live spot/VIX display values)
+        historical_df: Not used for feature computation (kept for API compat).
+                       Features come from merged_daily.parquet.
+        option_chain: Optional pre-fetched option chain (not used for features)
     """
-    import ta as ta_lib
+    from core.timezone import now_ist
 
+    # Load the ground truth data source
+    if not os.path.exists(MERGED_DAILY_PATH):
+        logger.error(f"merged_daily.parquet not found at {MERGED_DAILY_PATH}")
+        raise FileNotFoundError(
+            f"Cannot compute features: {MERGED_DAILY_PATH} missing. "
+            "Run data_collection.py to update it."
+        )
+
+    merged_daily = pd.read_parquet(MERGED_DAILY_PATH)
+    logger.info(f"Loaded merged_daily: {len(merged_daily)} rows, "
+                f"last date: {merged_daily.index[-1].date()}")
+
+    # Load Dhan features if available
+    dhan_features = None
+    if os.path.exists(DHAN_RAW_PATH) and os.path.exists(DHAN_SKEW_PATH):
+        dhan_features = load_dhan_options_features(DHAN_RAW_PATH, DHAN_SKEW_PATH)
+        if dhan_features is not None:
+            logger.info(f"Loaded Dhan features: {len(dhan_features)} days")
+
+    # Use the most recent date in merged_daily as the target
+    target_date = merged_daily.index[-1]
+    logger.info(f"Computing features for target_date={target_date.date()}")
+
+    # Call the shared module — EXACT same code as backtest
+    features = compute_features_for_date(
+        merged_daily, target_date, dhan_features,
+        data_start="2014-01-01", data_end="2026-12-31",
+    )
+
+    if features is None:
+        logger.error(f"compute_features_for_date returned None for {target_date.date()}")
+        raise ValueError(f"Feature computation failed for {target_date.date()} — likely NaN warmup")
+
+    # Get live spot/VIX for display (not used in model features)
     try:
         spot = await dhan_client.get_nifty_ltp()
         vix = await dhan_client.get_india_vix()
     except Exception as e:
-        logger.error(f"Failed to fetch live prices: {e}")
-        spot = historical_df["close"].iloc[-1] if len(historical_df) > 0 else 24000
-        vix = 14.0
+        logger.warning(f"Failed to fetch live prices for display: {e}")
+        spot = features.get("india_vix", 24000)
+        vix = features.get("india_vix", 14.0)
 
-    df = historical_df.copy()
-    if len(df) < 60:
-        logger.warning(f"Only {len(df)} days of history, need 250+")
-
-    close = df["close"]
-    high = df.get("high", close)
-
-    features = {}
-
-    # ── 1. Trend & Momentum ────────────────────────────────────────
-    features["nifty_return_5d"] = (spot / float(close.iloc[-5]) - 1) if len(close) >= 5 else 0
-    features["nifty_return_10d"] = (spot / float(close.iloc[-10]) - 1) if len(close) >= 10 else 0
-    features["nifty_return_20d"] = (spot / float(close.iloc[-20]) - 1) if len(close) >= 20 else 0
-
-    if len(close) >= 50:
-        sma50 = float(close.rolling(50).mean().iloc[-1])
-        features["nifty_distance_50dma"] = (spot - sma50) / sma50 * 100
-    else:
-        features["nifty_distance_50dma"] = 0
-
-    if len(close) >= 200:
-        sma200 = float(close.rolling(200).mean().iloc[-1])
-        features["nifty_distance_200dma"] = (spot - sma200) / sma200 * 100
-        sma50_val = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else 0
-        features["golden_cross"] = 1 if sma50_val > sma200 else 0
-    else:
-        features["nifty_distance_200dma"] = 0
-        features["golden_cross"] = 0
-
-    if len(close) >= 14:
-        rsi = ta_lib.momentum.RSIIndicator(close, window=14)
-        rsi_val = rsi.rsi().iloc[-1]
-        features["rsi_14"] = float(rsi_val) if not pd.isna(rsi_val) else 50.0
-    else:
-        features["rsi_14"] = 50.0
-
-    # Higher highs over 5 weeks (simplified)
-    if len(high) >= 35:
-        weekly_highs = []
-        for w in range(5):
-            start_idx = -(w + 1) * 5
-            end_idx = -w * 5 if w > 0 else None
-            segment = high.iloc[start_idx:end_idx]
-            weekly_highs.append(float(segment.max()) if len(segment) > 0 else 0)
-        weekly_highs.reverse()
-        hh_count = sum(1 for i in range(1, len(weekly_highs)) if weekly_highs[i] > weekly_highs[i - 1])
-        features["higher_highs_5w"] = hh_count
-    else:
-        features["higher_highs_5w"] = 0
-
-    # ── 2. Volatility ──────────────────────────────────────────────
-    features["india_vix"] = float(vix) if vix else 14.0
-
-    # VIX change 5d (approximate from current vix)
-    features["vix_change_5d"] = 0.0  # no VIX history in live, default to 0
-
-    # VIX percentile 252d
-    features["vix_percentile_252d"] = 50.0  # default, override if VIX history available
-
-    # Realized vol
-    if len(close) >= 20:
-        log_returns = np.log(close / close.shift(1)).dropna()
-        features["realized_vol_20d"] = float(log_returns.tail(20).std() * np.sqrt(252) * 100)
-    else:
-        features["realized_vol_20d"] = 15.0
-
-    features["variance_risk_premium"] = features["india_vix"] - features["realized_vol_20d"]
-
-    features["vix_rising_streak"] = 0  # no VIX history for streak
-
-    # ── 3. Sentiment ───────────────────────────────────────────────
-    ret_5d = features.get("nifty_return_5d", 0)
-    features["pcr_proxy"] = features["vix_change_5d"] / (ret_5d * 100 + 0.001)
-
-    # ── 4. Global context (try yfinance for latest) ────────────────
-    try:
-        import yfinance as yf
-        end_dt = now_ist()
-        start_dt = end_dt - timedelta(days=30)
-
-        sp500 = yf.download("^GSPC", start=start_dt.strftime("%Y-%m-%d"),
-                             end=end_dt.strftime("%Y-%m-%d"), progress=False)
-        if isinstance(sp500.columns, pd.MultiIndex):
-            sp500.columns = sp500.columns.get_level_values(0)
-        if len(sp500) >= 5:
-            features["sp500_return_5d"] = float(sp500["Close"].pct_change(5).iloc[-1])
-        else:
-            features["sp500_return_5d"] = 0.0
-
-        us_vix_data = yf.download("^VIX", start=start_dt.strftime("%Y-%m-%d"),
-                                    end=end_dt.strftime("%Y-%m-%d"), progress=False)
-        if isinstance(us_vix_data.columns, pd.MultiIndex):
-            us_vix_data.columns = us_vix_data.columns.get_level_values(0)
-        if len(us_vix_data) >= 1:
-            features["us_vix"] = float(us_vix_data["Close"].iloc[-1])
-            if len(us_vix_data) >= 5:
-                features["us_vix_change_5d"] = float(
-                    us_vix_data["Close"].iloc[-1] - us_vix_data["Close"].iloc[-5]
-                )
-            else:
-                features["us_vix_change_5d"] = 0.0
-        else:
-            features["us_vix"] = 0.0
-            features["us_vix_change_5d"] = 0.0
-
-        dxy = yf.download("DX-Y.NYB", start=start_dt.strftime("%Y-%m-%d"),
-                            end=end_dt.strftime("%Y-%m-%d"), progress=False)
-        if isinstance(dxy.columns, pd.MultiIndex):
-            dxy.columns = dxy.columns.get_level_values(0)
-        if len(dxy) >= 1:
-            features["dxy_level"] = float(dxy["Close"].iloc[-1])
-            if len(dxy) >= 5:
-                features["dxy_change_5d"] = float(dxy["Close"].iloc[-1] - dxy["Close"].iloc[-5])
-            else:
-                features["dxy_change_5d"] = 0.0
-        else:
-            features["dxy_level"] = 0.0
-            features["dxy_change_5d"] = 0.0
-
-        us10y = yf.download("^TNX", start=start_dt.strftime("%Y-%m-%d"),
-                              end=end_dt.strftime("%Y-%m-%d"), progress=False)
-        if isinstance(us10y.columns, pd.MultiIndex):
-            us10y.columns = us10y.columns.get_level_values(0)
-        if len(us10y) >= 1:
-            features["us10y_level"] = float(us10y["Close"].iloc[-1])
-            if len(us10y) >= 5:
-                features["us10y_change_5d"] = float(us10y["Close"].iloc[-1] - us10y["Close"].iloc[-5])
-            else:
-                features["us10y_change_5d"] = 0.0
-            if len(us10y) >= 20:
-                features["us10y_change_20d"] = float(us10y["Close"].iloc[-1] - us10y["Close"].iloc[-20])
-            else:
-                features["us10y_change_20d"] = 0.0
-        else:
-            features["us10y_level"] = 0.0
-            features["us10y_change_5d"] = 0.0
-            features["us10y_change_20d"] = 0.0
-
-    except Exception as e:
-        logger.warning(f"Failed to get global market data: {e}")
-        features.setdefault("sp500_return_5d", 0.0)
-        features.setdefault("us_vix", 0.0)
-        features.setdefault("us_vix_change_5d", 0.0)
-        features.setdefault("dxy_level", 0.0)
-        features.setdefault("dxy_change_5d", 0.0)
-        features.setdefault("us10y_level", 0.0)
-        features.setdefault("us10y_change_5d", 0.0)
-        features.setdefault("us10y_change_20d", 0.0)
-
-    # ── 5. Calendar ────────────────────────────────────────────────
-    today = now_ist()
-    features["day_of_month"] = today.day
-    features["month"] = today.month
-    features["is_volatile_month"] = 1 if today.month in [9, 10] else 0
-
-    # Days to monthly expiry
-    exp = _get_last_thursday(today.year, today.month)
-    if exp < today.date():
-        # Expiry already passed this month, use next month
-        nm = today.month + 1
-        ny = today.year
-        if nm > 12:
-            nm = 1
-            ny += 1
-        exp = _get_last_thursday(ny, nm)
-    dte = (exp - today.date()).days
-    features["days_to_monthly_expiry"] = max(dte, 1)
-    features["is_expiry_week"] = 1 if dte <= 5 else 0
-
-    # ── 6. Options-derived (from Dhan option chain or defaults) ────
-    features["deep_otm_oi_ratio"] = 0.0
-    features["deep_otm_oi_ratio_change_5d"] = 0.0
-    features["put_oi_buildup_ratio"] = 0.0
-    features["put_volume_surge_ratio"] = 1.0
-    features["iv_skew_steepness"] = 0.0
-    features["iv_skew_change_5d"] = 0.0
-    features["atm_iv"] = (vix / 100.0) if vix else 0.14
-    features["atm_iv_percentile_252d"] = features["vix_percentile_252d"]
-    features["atm_put_intraday_range"] = 0.0
-
-    if option_chain:
-        try:
-            _extract_option_features(features, option_chain, spot)
-        except Exception as e:
-            logger.warning(f"Failed to extract option features: {e}")
-
-    # ── Clean NaN/inf ──────────────────────────────────────────────
-    for k, v in features.items():
-        if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
-            features[k] = 0.0
-
-    logger.info(f"Built {len(features)} features, spot={spot}, vix={vix}")
-
-    # Also store display-friendly aliases for the frontend
+    # Add display-friendly aliases for the frontend (not model inputs)
     features["vix"] = features["india_vix"]
-    features["nifty_close"] = spot
+    features["nifty_close"] = spot if spot else float(merged_daily['nifty_close'].iloc[-1])
     features["vix_20d_avg"] = features["india_vix"]
     features["vix_percentile_20d"] = features["vix_percentile_252d"] / 100.0
 
+    logger.info(f"Built {len(features)} features for {target_date.date()}, "
+                f"spot={spot}, vix={vix}")
+
     return features
-
-
-def _extract_option_features(features: dict, option_chain: dict,
-                              spot: float):
-    """Extract option-derived features from Dhan option chain response."""
-    data = option_chain.get("data", [])
-    if not data:
-        return
-
-    max_put_oi = 0
-    max_put_strike = spot * 0.97
-    max_call_oi = 0
-    max_call_strike = spot * 1.03
-    total_put_oi = 0
-    total_call_oi = 0
-    atm_put_iv = None
-    atm_call_iv = None
-    deep_otm_oi = 0
-    near_otm_oi = 0
-
-    for item in data:
-        strike = item.get("strikePrice", 0)
-        put_oi = item.get("putOI", 0) or 0
-        call_oi = item.get("callOI", 0) or 0
-        put_iv = item.get("putIV", 0) or 0
-        call_iv = item.get("callIV", 0) or 0
-
-        total_put_oi += put_oi
-        total_call_oi += call_oi
-
-        otm_pct = (spot - strike) / spot if spot > 0 else 0
-
-        # Deep OTM (7-10% below spot) vs Near OTM (0-3% below)
-        if 0.07 <= otm_pct <= 0.10:
-            deep_otm_oi += put_oi
-        elif 0 <= otm_pct <= 0.03:
-            near_otm_oi += put_oi
-
-        if put_oi > max_put_oi:
-            max_put_oi = put_oi
-            max_put_strike = strike
-        if call_oi > max_call_oi:
-            max_call_oi = call_oi
-            max_call_strike = strike
-
-        # Find ATM strike
-        if abs(strike - spot) < 50:
-            atm_put_iv = put_iv
-            atm_call_iv = call_iv
-
-    # Deep OTM OI ratio
-    if near_otm_oi > 0:
-        features["deep_otm_oi_ratio"] = deep_otm_oi / near_otm_oi
-
-    # PCR proxy (already computed from VIX, but we can refine here)
-    if total_call_oi > 0:
-        features["put_call_ratio_raw"] = total_put_oi / total_call_oi
-
-    # IV skew
-    if atm_put_iv and atm_call_iv:
-        features["iv_skew_steepness"] = (atm_put_iv - atm_call_iv) / 100.0
-        features["atm_iv"] = (atm_put_iv + atm_call_iv) / 200.0
 
 
 def format_indicators_for_display(features: dict) -> list:
