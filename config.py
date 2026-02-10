@@ -23,13 +23,10 @@ elif _raw_db_url.startswith("postgresql://"):
 elif _raw_db_url and not _raw_db_url.startswith("postgresql+asyncpg://"):
     _raw_db_url = "postgresql+asyncpg://" + _raw_db_url
 
-# Strip sslmode from URL — asyncpg doesn't accept it as a URL param.
-# SSL is handled via connect_args in database.py instead.
-import re
-if _raw_db_url:
-    _raw_db_url = re.sub(r'[?&]sslmode=[^&]*', '', _raw_db_url)
-    # Clean up trailing ? if sslmode was the only param
-    _raw_db_url = _raw_db_url.rstrip('?')
+# Strip ALL query params from URL — asyncpg doesn't accept URL query params
+# like sslmode, channel_binding, etc. SSL is handled via connect_args in database.py.
+if _raw_db_url and "?" in _raw_db_url:
+    _raw_db_url = _raw_db_url.split("?")[0]
 
 DATABASE_URL = _raw_db_url or "postgresql+asyncpg://localhost/nifty_paper"
 DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN", "")
