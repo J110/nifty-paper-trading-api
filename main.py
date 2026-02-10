@@ -82,7 +82,7 @@ app.include_router(charts_router)
 app.include_router(returns_router)
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     """Health check endpoint for Render + UptimeRobot pinger."""
     from sqlalchemy import select, func
