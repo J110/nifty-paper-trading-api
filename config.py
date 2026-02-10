@@ -23,10 +23,13 @@ elif _raw_db_url.startswith("postgresql://"):
 elif _raw_db_url and not _raw_db_url.startswith("postgresql+asyncpg://"):
     _raw_db_url = "postgresql+asyncpg://" + _raw_db_url
 
-# Add sslmode=require for Neon (required for serverless Postgres)
-if _raw_db_url and "sslmode" not in _raw_db_url:
-    separator = "&" if "?" in _raw_db_url else "?"
-    _raw_db_url += f"{separator}sslmode=require"
+# Strip sslmode from URL — asyncpg doesn't accept it as a URL param.
+# SSL is handled via connect_args in database.py instead.
+import re
+if _raw_db_url:
+    _raw_db_url = re.sub(r'[?&]sslmode=[^&]*', '', _raw_db_url)
+    # Clean up trailing ? if sslmode was the only param
+    _raw_db_url = _raw_db_url.rstrip('?')
 
 DATABASE_URL = _raw_db_url or "postgresql+asyncpg://localhost/nifty_paper"
 DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN", "")
