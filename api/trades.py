@@ -84,29 +84,58 @@ async def get_delay_analysis(
     }
 
 
+FORWARD_TEST_START = date(2025, 2, 11)
+
+
 @router.get("/trades/{version}/returns")
 async def get_returns(
     version: str,
     period: str = Query("weekly", regex="^(daily|weekly|monthly)$"),
+    data_mode: str = Query("combined", regex="^(backtest|forwardtest|combined)$"),
+    from_date: str | None = Query(None, regex=r"^\d{4}-\d{2}-\d{2}$"),
+    to_date: str | None = Query(None, regex=r"^\d{4}-\d{2}-\d{2}$"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Returns periodic returns."""
+    """
+    Returns periodic returns.
+
+    data_mode:
+      - backtest: trades with entry_date < 2025-02-11
+      - forwardtest: trades with entry_date >= 2025-02-11
+      - combined: all trades
+
+    from_date / to_date: optional ISO date strings to further restrict the range.
+    """
     if version not in ACTIVE_VERSIONS:
         return {"error": f"Unknown version: {version}"}
 
-    # Get closed trades sorted by date
-    result = await db.execute(
-        select(Trade).where(
-            Trade.version == version,
-            Trade.status == "closed"
-        ).order_by(Trade.exit_date)
+    # Build query
+    stmt = select(Trade).where(
+        Trade.version == version,
+        Trade.status == "closed",
     )
+
+    # Apply data_mode filter
+    if data_mode == "backtest":
+        stmt = stmt.where(Trade.entry_date < FORWARD_TEST_START)
+    elif data_mode == "forwardtest":
+        stmt = stmt.where(Trade.entry_date >= FORWARD_TEST_START)
+
+    # Apply optional date range filters
+    if from_date:
+        stmt = stmt.where(Trade.exit_date >= date.fromisoformat(from_date))
+    if to_date:
+        stmt = stmt.where(Trade.exit_date <= date.fromisoformat(to_date))
+
+    stmt = stmt.order_by(Trade.exit_date)
+    result = await db.execute(stmt)
     trades = result.scalars().all()
 
     if not trades:
         return {
             "version": version,
             "period": period,
+            "data_mode": data_mode,
             "returns": [],
             "cumulative": [],
         }
@@ -161,6 +190,7 @@ async def get_returns(
     return {
         "version": version,
         "period": period,
+        "data_mode": data_mode,
         "returns": returns,
         "cumulative": cumulative,
     }
