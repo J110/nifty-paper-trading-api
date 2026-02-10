@@ -6,6 +6,7 @@ Sends beautifully formatted HTML emails when trades are ready to execute.
 import logging
 import httpx
 from datetime import datetime
+from core.timezone import now_ist
 from config import VERSION_CONFIGS
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,7 @@ def _build_trade_html(
                 {emoji} Trade Signal — {version_label}
             </h1>
             <p style="margin:4px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">
-                {datetime.now().strftime('%d %b %Y, %I:%M %p IST')}
+                {now_ist().strftime('%d %b %Y, %I:%M %p IST')}
             </p>
         </div>
 
@@ -195,7 +196,7 @@ def _build_no_trade_html(
                 \U0001F534 No Trade Today
             </h1>
             <p style="margin:4px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">
-                {datetime.now().strftime('%d %b %Y, %I:%M %p IST')}
+                {now_ist().strftime('%d %b %Y, %I:%M %p IST')}
             </p>
         </div>
         <div style="padding:20px 24px;">
@@ -250,7 +251,7 @@ def _build_exit_html(
                 {emoji} Trade Closed — {version_label}
             </h1>
             <p style="margin:4px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">
-                {datetime.now().strftime('%d %b %Y, %I:%M %p IST')}
+                {now_ist().strftime('%d %b %Y, %I:%M %p IST')}
             </p>
         </div>
         <div style="padding:20px 24px;">

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 
 import httpx
 
+from core.timezone import now_ist
 from config import DHAN_ACCESS_TOKEN, DHAN_CLIENT_ID, DHAN_API_BASE
 
 logger = logging.getLogger(__name__)
@@ -188,8 +189,8 @@ class DhanClient:
 
         Returns a list of candle dicts, or None on error.
         """
-        to_date = datetime.now().strftime("%Y-%m-%d")
-        from_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        to_date = now_ist().strftime("%Y-%m-%d")
+        from_date = (now_ist() - timedelta(days=days)).strftime("%Y-%m-%d")
         try:
             data = await self._post(
                 "/charts/historical",
@@ -223,8 +224,8 @@ class DhanClient:
                     "exchangeSegment": "IDX_I",
                     "instrument": "INDEX",
                     "interval": interval,
-                    "fromDate": datetime.now().strftime("%Y-%m-%d"),
-                    "toDate": datetime.now().strftime("%Y-%m-%d"),
+                    "fromDate": now_ist().strftime("%Y-%m-%d"),
+                    "toDate": now_ist().strftime("%Y-%m-%d"),
                 },
             )
             return self._extract_candles(data)

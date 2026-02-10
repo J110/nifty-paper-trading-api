@@ -85,10 +85,10 @@ app.include_router(returns_router)
 @app.get("/health")
 async def health_check():
     """Health check endpoint for Render + UptimeRobot pinger."""
-    from datetime import date, datetime
     from sqlalchemy import select, func
     from db.database import async_session_factory
     from db.models import Prediction
+    from core.timezone import now_ist, today_ist
 
     # Quick DB check: is today's prediction present?
     today_predictions = 0
@@ -97,7 +97,7 @@ async def health_check():
         async with async_session_factory() as db:
             result = await db.execute(
                 select(func.count()).select_from(Prediction).where(
-                    Prediction.date == date.today()
+                    Prediction.date == today_ist()
                 )
             )
             today_predictions = result.scalar() or 0
@@ -118,7 +118,7 @@ async def health_check():
         "scheduler_running": scheduler_running,
         "today_predictions": today_predictions,
         "last_prediction_date": last_prediction_date.isoformat() if last_prediction_date else None,
-        "server_time": datetime.now().isoformat(),
+        "server_time_ist": now_ist().isoformat(),
     }
 
 

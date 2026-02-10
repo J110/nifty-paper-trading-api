@@ -7,6 +7,7 @@ import logging
 import math
 from datetime import datetime, date, timedelta
 from scipy.stats import norm
+from core.timezone import today_ist
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,7 @@ def get_next_weekly_expiry(from_date: date = None) -> date:
     If today is Thursday, returns next Thursday.
     """
     if from_date is None:
-        from_date = date.today()
+        from_date = today_ist()
 
     days_until_thursday = (3 - from_date.weekday()) % 7
     if days_until_thursday == 0:

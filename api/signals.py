@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
 from db.models import Prediction, DailyFeature
+from core.timezone import now_ist, today_ist
 from core.signal_mapper import map_signal, get_classification_breakdown
 from core.feature_engine import format_indicators_for_display
 from config import VERSION_CONFIGS, ACTIVE_VERSIONS
@@ -20,7 +21,7 @@ async def get_current_signals(db: AsyncSession = Depends(get_db)):
     Returns current model prediction and classification breakdown
     for all active versions.
     """
-    today = date.today()
+    today = today_ist()
 
     # Get latest prediction (any version — same model, same prediction)
     result = await db.execute(
@@ -52,7 +53,7 @@ async def get_current_signals(db: AsyncSession = Depends(get_db)):
             daily_feature = feat_result2.scalar_one_or_none()
         else:
             return {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": now_ist().isoformat(),
                 "nifty_spot": None,
                 "predicted_drawdown": None,
                 "classification": None,

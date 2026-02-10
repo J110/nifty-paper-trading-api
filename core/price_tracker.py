@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models import DelayPrice, Trade, PriceSnapshot
 from core.option_pricer import compute_spread_value
+from core.timezone import now_ist, today_ist
 from config import RISK_FREE_RATE, NIFTY_LOT_SIZE
 
 logger = logging.getLogger(__name__)
@@ -32,9 +33,9 @@ DELAY_INTERVALS = [
 
 
 def is_market_hours(dt: datetime = None) -> bool:
-    """Check if given time (or now) is during market hours."""
+    """Check if given time (or now) is during market hours (IST)."""
     if dt is None:
-        dt = datetime.now()
+        dt = now_ist()
     t = dt.time()
     return MARKET_OPEN <= t <= MARKET_CLOSE and dt.weekday() < 5
 
@@ -115,7 +116,7 @@ class PriceTracker:
             return
 
         # Compute current spread value
-        dte = (trade.expiry - date.today()).days
+        dte = (trade.expiry - today_ist()).days
         T = max(dte / 365.0, 1 / 365.0)
         try:
             vix = await dhan_client.get_india_vix()
@@ -172,7 +173,7 @@ class PriceTracker:
         db: AsyncSession
     ):
         """Record a periodic price snapshot (every 5 min)."""
-        now = datetime.now()
+        now = now_ist()
         snapshot = PriceSnapshot(
             timestamp=now,
             nifty_spot=spot,

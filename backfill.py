@@ -15,6 +15,7 @@ import pandas as pd
 import ta as ta_lib
 from datetime import date, datetime, timedelta
 
+from core.timezone import today_ist
 from db.models import Prediction, Trade, DailyPnl, DailyFeature
 from core.model_runner import ModelRunner
 from core.signal_mapper import map_signal, get_classification_breakdown
@@ -298,7 +299,7 @@ async def run_backfill(db_session) -> dict:
 
     # Download historical data (need extra history for feature computation: 200-day MA, 252-day VIX)
     start_download = date(2025, 1, 1)  # ~1 year before backfill start for warmup
-    end_download = date.today()
+    end_download = today_ist()
 
     nifty, india_vix_df, sp500, us_vix_df, dxy, us10y = _download_market_data(
         start_download, end_download

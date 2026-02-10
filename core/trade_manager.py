@@ -14,6 +14,7 @@ from typing import Optional
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.timezone import now_ist, today_ist
 from config import (
     INITIAL_CAPITAL, NIFTY_LOT_SIZE, RISK_FREE_RATE,
     MARGIN_PER_LOT_BULL, MARGIN_PER_LOT_IC, VERSION_CONFIGS,
@@ -65,8 +66,8 @@ class TradeManager:
         # Check minimum entry gap
         min_gap = cfg.get("MIN_ENTRY_GAP_DAYS", 2)
         last_entry = await self._get_last_entry_date(db, version)
-        if last_entry and (date.today() - last_entry).days < min_gap:
-            logger.info(f"[{version}] Entry gap too small ({(date.today() - last_entry).days} < {min_gap})")
+        if last_entry and (today_ist() - last_entry).days < min_gap:
+            logger.info(f"[{version}] Entry gap too small ({(today_ist() - last_entry).days} < {min_gap})")
             return None
 
         # Select strikes
@@ -81,7 +82,7 @@ class TradeManager:
 
         # Compute expiry
         expiry = get_next_weekly_expiry()
-        T = compute_time_to_expiry_years(date.today(), expiry)
+        T = compute_time_to_expiry_years(today_ist(), expiry)
         sigma = vix / 100.0 if vix else 0.15
 
         # Compute credit
@@ -123,17 +124,17 @@ class TradeManager:
             entry_mode = "normal"  # Event detection would be more complex
 
         # Create trade ID
-        trade_id = f"{version.replace('.', '')}-{date.today().isoformat()}-{signal['signal']}"
+        trade_id = f"{version.replace('.', '')}-{today_ist().isoformat()}-{signal['signal']}"
 
-        now = datetime.now()
+        now = now_ist()
         trade = Trade(
             trade_id=trade_id,
             version=version,
-            date=date.today(),
+            date=today_ist(),
             signal_type=signal["signal"],
             trade_type=trade_type,
             entry_mode=entry_mode,
-            entry_date=date.today(),
+            entry_date=today_ist(),
             entry_time=now,
             entry_spot=spot,
             expiry=expiry,
@@ -206,7 +207,7 @@ class TradeManager:
     async def _check_single_exit(self, trade: Trade, spot: float,
                                   vix: float, cfg: dict) -> Optional[str]:
         """Check if a single trade should be exited. Returns exit reason or None."""
-        today = date.today()
+        today = today_ist()
         dte = (trade.expiry - today).days
 
         # 1. Expiry exit
@@ -269,10 +270,10 @@ class TradeManager:
     async def _close_trade(self, trade: Trade, spot: float,
                             exit_reason: str, db: AsyncSession) -> Optional[dict]:
         """Close a trade and record final PnL. Returns trade info dict for notifications."""
-        now = datetime.now()
+        now = now_ist()
 
         # Compute final PnL
-        T = max((trade.expiry - date.today()).days / 365.0, 1 / 365.0)
+        T = max((trade.expiry - today_ist()).days / 365.0, 1 / 365.0)
         sigma = 0.15  # Approximate; in production use live VIX
         current_value = compute_spread_value(
             trade.trade_type, spot,
@@ -290,7 +291,7 @@ class TradeManager:
         )
 
         trade.status = "closed"
-        trade.exit_date = date.today()
+        trade.exit_date = today_ist()
         trade.exit_time = now
         trade.exit_spot = spot
         trade.exit_reason = exit_reason
@@ -320,7 +321,7 @@ class TradeManager:
     async def _update_trade_pnl(self, trade: Trade, spot: float,
                                  vix: float, db: AsyncSession):
         """Update unrealized PnL for an open trade."""
-        T = max((trade.expiry - date.today()).days / 365.0, 1 / 365.0)
+        T = max((trade.expiry - today_ist()).days / 365.0, 1 / 365.0)
         sigma = vix / 100.0 if vix else 0.15
         current_value = compute_spread_value(
             trade.trade_type, spot,
@@ -339,7 +340,7 @@ class TradeManager:
             unrealized_pnl / trade.capital_deployed * 100
             if trade.capital_deployed > 0 else 0
         )
-        trade.updated_at = datetime.now()
+        trade.updated_at = now_ist()
         await db.commit()
 
     async def get_portfolio_state(self, version: str,

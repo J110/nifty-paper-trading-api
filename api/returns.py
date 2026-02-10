@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
 from db.models import DailyFeature
+from core.timezone import today_ist
 from core.feature_engine import format_indicators_for_display
 
 router = APIRouter(prefix="/api")
@@ -18,7 +19,7 @@ async def get_indicators(
     db: AsyncSession = Depends(get_db),
 ):
     """Return historical indicator values for charting."""
-    start_date = date.today() - timedelta(days=days)
+    start_date = today_ist() - timedelta(days=days)
 
     result = await db.execute(
         select(DailyFeature).where(

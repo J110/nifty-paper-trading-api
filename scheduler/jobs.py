@@ -13,6 +13,7 @@ from sqlalchemy import select, func
 
 from db.database import async_session_factory
 from db.models import Prediction, DailyFeature, DailyPnl, PriceSnapshot
+from core.timezone import now_ist, today_ist
 from core.dhan_client import DhanClient
 from core.model_runner import ModelRunner
 from core.signal_mapper import map_signal, get_classification_breakdown
@@ -99,25 +100,23 @@ async def check_and_recover_missed_prediction():
     prediction exists for today, auto-run the prediction pipeline.
     """
     try:
-        from zoneinfo import ZoneInfo
-        ist = ZoneInfo("Asia/Kolkata")
-        now_ist = datetime.now(ist)
+        current_time = now_ist()
 
         # Only recover on weekdays during market hours (9:20 AM - 3:30 PM)
-        if now_ist.weekday() >= 5:  # Weekend
+        if current_time.weekday() >= 5:  # Weekend
             logger.info("Startup recovery: weekend — skipping")
             return
 
-        if now_ist.time() < dtime(9, 20):
+        if current_time.time() < dtime(9, 20):
             logger.info("Startup recovery: before 9:20 AM — scheduler will handle it")
             return
 
-        if now_ist.time() > dtime(15, 30):
+        if current_time.time() > dtime(15, 30):
             logger.info("Startup recovery: after market close — too late to recover")
             return
 
         # Check if today's prediction exists in DB
-        today = date.today()
+        today = current_time.date()
         async with async_session_factory() as db:
             result = await db.execute(
                 select(func.count()).select_from(Prediction).where(
@@ -134,7 +133,7 @@ async def check_and_recover_missed_prediction():
 
         # No predictions for today — run the pipeline now
         logger.warning(
-            f"Startup recovery: NO predictions for {today} and it's {now_ist.strftime('%H:%M')} IST. "
+            f"Startup recovery: NO predictions for {today} and it's {current_time.strftime('%H:%M')} IST. "
             f"Running missed prediction pipeline..."
         )
         await generate_daily_predictions()
@@ -242,7 +241,7 @@ async def generate_daily_predictions():
         async with async_session_factory() as db:
             # Store features
             daily_feature = DailyFeature(
-                date=date.today(),
+                date=today_ist(),
                 features=features,
                 vix=features.get("vix"),
                 vix_20d_avg=features.get("vix_20d_avg"),
@@ -278,8 +277,8 @@ async def generate_daily_predictions():
 
                 # Store prediction
                 pred = Prediction(
-                    date=date.today(),
-                    timestamp=datetime.now(),
+                    date=today_ist(),
+                    timestamp=now_ist(),
                     predicted_drawdown=prediction_value,
                     signal_type=signal["signal"],
                     version=version,
@@ -307,7 +306,7 @@ async def generate_daily_predictions():
                         await price_tracker.record_initial_price(
                             trade_id=trade_result["trade_id"],
                             version=version,
-                            signal_time=datetime.now(),
+                            signal_time=now_ist(),
                             spot=spot,
                             spread_price=trade_result.get("credit", 0),
                             db=db,
@@ -440,7 +439,7 @@ async def eod_processing():
                 from sqlalchemy import select
                 result = await db.execute(
                     select(DailyPnl).where(
-                        DailyPnl.date == date.today(),
+                        DailyPnl.date == today_ist(),
                         DailyPnl.version == version,
                     )
                 )
@@ -454,7 +453,7 @@ async def eod_processing():
                     existing.open_positions = portfolio["open_positions"]
                 else:
                     daily_pnl = DailyPnl(
-                        date=date.today(),
+                        date=today_ist(),
                         version=version,
                         starting_capital=INITIAL_CAPITAL,
                         ending_capital=portfolio["current_capital"],

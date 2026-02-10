@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta, date
 from typing import Optional
+from core.timezone import now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +244,7 @@ async def build_live_features(dhan_client, historical_df: pd.DataFrame,
     # ── 4. Global context (try yfinance for latest) ────────────────
     try:
         import yfinance as yf
-        end_dt = datetime.now()
+        end_dt = now_ist()
         start_dt = end_dt - timedelta(days=30)
 
         sp500 = yf.download("^GSPC", start=start_dt.strftime("%Y-%m-%d"),
@@ -316,7 +317,7 @@ async def build_live_features(dhan_client, historical_df: pd.DataFrame,
         features.setdefault("us10y_change_20d", 0.0)
 
     # ── 5. Calendar ────────────────────────────────────────────────
-    today = datetime.now()
+    today = now_ist()
     features["day_of_month"] = today.day
     features["month"] = today.month
     features["is_volatile_month"] = 1 if today.month in [9, 10] else 0

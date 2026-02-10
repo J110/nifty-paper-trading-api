@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
 from db.models import PriceSnapshot, DailyPnl, Prediction
+from core.timezone import today_ist
 from config import ACTIVE_VERSIONS, INITIAL_CAPITAL
 from core.dhan_client import DhanClient
 
@@ -30,9 +31,10 @@ async def _get_dhan() -> DhanClient:
 
 
 def _epoch_to_iso_date(ts) -> str:
-    """Convert a Dhan epoch timestamp (seconds) to ISO date string."""
+    """Convert a Dhan epoch timestamp (seconds) to ISO date string (IST)."""
     try:
-        return datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
+        from core.timezone import IST
+        return datetime.fromtimestamp(int(ts), tz=IST).strftime("%Y-%m-%d")
     except (TypeError, ValueError, OSError):
         return str(ts)
 
@@ -51,7 +53,7 @@ async def get_nifty_chart(
       2. Dhan historical API (daily OHLC — works for all periods)
       3. Prediction nifty_spot fallback (limited to paper-trading period)
     """
-    today = date.today()
+    today = today_ist()
 
     period_days = {
         "1d": 1, "5d": 5, "1w": 7, "1m": 30, "3m": 90,
