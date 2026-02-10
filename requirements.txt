@@ -6,10 +6,10 @@ alembic==1.13.1
 httpx==0.26.0
 apscheduler==3.10.4
 scikit-learn==1.6.1
-joblib==1.4.2
+joblib==1.5.3
 pandas==2.1.4
-numpy==1.26.3
-scipy==1.12.0
+numpy==2.0.2
+scipy==1.13.1
 python-dotenv==1.0.0
 ta==0.11.0
 yfinance==0.2.36
