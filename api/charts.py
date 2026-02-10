@@ -300,35 +300,48 @@ async def get_drawdown_comparison(
     }
 
 
+FORWARD_TEST_START = date(2026, 2, 11)
+
+
 @router.get("/chart-data/equity/{version}")
 async def get_equity_curve(
     version: str,
+    data_mode: str = Query("combined", regex="^(backtest|forwardtest|combined)$"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Paper trading equity curve for a version."""
+    """Paper trading equity curve for a version, filterable by data mode."""
     if version not in ACTIVE_VERSIONS:
         return {"error": f"Unknown version: {version}"}
 
-    result = await db.execute(
-        select(DailyPnl).where(
-            DailyPnl.version == version
-        ).order_by(DailyPnl.date)
-    )
+    stmt = select(DailyPnl).where(DailyPnl.version == version)
+
+    if data_mode == "backtest":
+        stmt = stmt.where(DailyPnl.date < FORWARD_TEST_START)
+    elif data_mode == "forwardtest":
+        stmt = stmt.where(DailyPnl.date >= FORWARD_TEST_START)
+
+    stmt = stmt.order_by(DailyPnl.date)
+    result = await db.execute(stmt)
     daily_pnls = result.scalars().all()
 
+    # For non-combined modes, rebase the equity curve from INITIAL_CAPITAL
     equity_points = []
+    cumulative_pnl = 0.0
     for dp in daily_pnls:
+        cumulative_pnl += dp.daily_pnl
+        capital = INITIAL_CAPITAL + cumulative_pnl
         equity_points.append({
             "date": dp.date.isoformat(),
-            "capital": dp.ending_capital,
+            "capital": round(capital, 2),
             "daily_pnl": dp.daily_pnl,
-            "cumulative_pnl": dp.cumulative_pnl,
-            "cumulative_return_pct": dp.cumulative_return_pct,
+            "cumulative_pnl": round(cumulative_pnl, 2),
+            "cumulative_return_pct": round(cumulative_pnl / INITIAL_CAPITAL * 100, 2),
             "open_positions": dp.open_positions,
         })
 
     return {
         "version": version,
+        "data_mode": data_mode,
         "starting_capital": INITIAL_CAPITAL,
         "equity_curve": equity_points,
     }
