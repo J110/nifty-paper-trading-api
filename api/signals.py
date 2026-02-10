@@ -62,15 +62,12 @@ async def get_current_signals(db: AsyncSession = Depends(get_db)):
                 "status": "no_prediction_today",
             }
 
-    # Build classification breakdown
-    classification = get_classification_breakdown(prediction.predicted_drawdown)
-
     # Build version-specific signals
     version_signals = {}
     for version in ACTIVE_VERSIONS:
         cfg = VERSION_CONFIGS[version]
         signal = map_signal(prediction.predicted_drawdown, cfg)
-        version_signals[version] = {
+        ver_signal = {
             "signal": signal["signal"],
             "trade_type": signal["trade_type"],
             "size_mult": signal["size_mult"],
@@ -78,6 +75,16 @@ async def get_current_signals(db: AsyncSession = Depends(get_db)):
             "color": cfg["color"],
             "position_size_pct": cfg["POSITION_SIZE_PCT"],
         }
+        # Add bear debit info for v6.2+
+        if signal.get("bear_tier", 0) > 0:
+            ver_signal["bear_tier"] = signal["bear_tier"]
+        version_signals[version] = ver_signal
+
+    # Build classification breakdown (use v6.2 for 7-zone if available)
+    classification_version = "v6.2" if "v6.2" in ACTIVE_VERSIONS else None
+    classification = get_classification_breakdown(
+        prediction.predicted_drawdown, version=classification_version
+    )
 
     # Build indicators
     indicators = []
@@ -114,7 +121,7 @@ async def get_signal_history(
 
     history = []
     for p in predictions:
-        classification = get_classification_breakdown(p.predicted_drawdown)
+        classification = get_classification_breakdown(p.predicted_drawdown, version=p.version)
         history.append({
             "date": p.date.isoformat(),
             "predicted_drawdown": p.predicted_drawdown,

@@ -64,6 +64,7 @@ IC_CALL_OTM_BUY = 0.055
 # Margin per lot
 MARGIN_PER_LOT_BULL = 13_750
 MARGIN_PER_LOT_IC = 13_750
+MARGIN_PER_LOT_BEAR = 18_750
 
 # Classification thresholds (shared by all versions)
 DRAWDOWN_BULL_FULL = -0.015     # > -1.5%: bull full
@@ -209,10 +210,71 @@ VERSION_CONFIGS = {
         "POST_EVENT_FOLLOWUP_ENABLED": True,
         "POST_EVENT_IV_THRESHOLD": 0.03,
     },
+
+    "v6.2": {
+        "label": "Bear Alpha",
+        "color": "#E5534B",  # red
+
+        # Sizing: same as v5.4.4
+        "POSITION_SIZE_PCT": 0.20,
+        "IC_POSITION_SIZE_PCT": 0.20,
+        "MAX_CONCURRENT_POSITIONS": 3,
+        "IC_MAX_CONCURRENT": 3,
+        "MIN_ENTRY_GAP_DAYS": 2,
+
+        # Exits: same as v5.4.4
+        "PROFIT_TARGET_EARLY": 0.45,
+        "PROFIT_TARGET_MID": 0.60,
+        "PROFIT_TARGET_LATE": 0.75,
+        "STOP_LOSS_MULTIPLIER": 2.5,
+        "STOP_LOSS_CONFIRM_DAYS": 1,
+        "IC_STOP_LOSS_MULTIPLIER": 2.5,
+        "IC_STOP_LOSS_CONFIRM_DAYS": 1,
+        "TRAILING_STOP_ACTIVATE": 0.45,
+        "TRAILING_STOP_LEVEL": 0.15,
+        "MIN_DTE_EXIT": 1,
+
+        # Signal mapping: directional_bear (graduated_gentle above IC, bear debit below)
+        "SIGNAL_MAPPING": "directional_bear",
+        "GRADUATED_FLOOR": 0.80,
+        "GRADUATED_HW": 0.25,
+
+        # Advanced features: same as v5.4.4
+        "IC_CALL_OTM_SELL": 0.04,
+        "IC_CALL_OTM_BUY": 0.065,
+        "OI_WALL_ENABLED": True,
+        "OI_WALL_MIN_RATIO": 1.5,
+        "VIX_HARVEST_ENABLED": True,
+        "VIX_HARVEST_TRIGGER": 23,
+        "VIX_HARVEST_REVERT_DROP": 2,
+        "EVENT_CRUSH_ENABLED": True,
+        "EVENT_CRUSH_IV_INFLATE": 0.10,
+        "SCALE_INTO_WINNERS_ENABLED": True,
+        "SCALE_PROFIT_TRIGGER": 0.30,
+        "POST_EVENT_FOLLOWUP_ENABLED": True,
+        "POST_EVENT_IV_THRESHOLD": 0.03,
+
+        # Bear debit spread parameters
+        "BEAR_DEBIT_ENABLED": True,
+        "BEAR_DEBIT_THRESHOLD": -0.065,
+        "BEAR_STRONG_THRESHOLD": -0.090,
+        "BEAR_MODERATE_THRESHOLD": -0.065,
+        "BEAR_PUT_BUY_OTM": 0.01,
+        "BEAR_PUT_SELL_OTM": 0.04,
+        "BEAR_SIZE_MULT_T1": 0.50,
+        "BEAR_SIZE_MULT_T2": 0.25,
+        "BEAR_DEBIT_PROFIT_TARGET": 2.0,
+        "BEAR_DEBIT_STOP_LOSS": 0.70,
+        "BEAR_DEBIT_TRAILING_ACTIVATE": 1.0,
+        "BEAR_DEBIT_TRAILING_LEVEL": 0.30,
+        "BEAR_DEBIT_MAX_CONCURRENT": 2,
+        "BEAR_DEBIT_MAX_HOLD_DAYS": 8,
+        "BEAR_DEBIT_BLOCKS_CREDIT": False,
+    },
 }
 
 # All versions that are actively paper traded
-ACTIVE_VERSIONS = ["v5.4.2", "v5.4.3", "v5.4.4"]
+ACTIVE_VERSIONS = ["v5.4.2", "v5.4.3", "v5.4.4", "v6.2"]
 
 # Model file paths
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ml")

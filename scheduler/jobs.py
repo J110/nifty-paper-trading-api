@@ -268,7 +268,7 @@ async def generate_daily_predictions():
                 })
 
                 # Compute confidence score (distance from nearest boundary)
-                breakdown = get_classification_breakdown(prediction_value)
+                breakdown = get_classification_breakdown(prediction_value, version=version)
                 active_zone = next(
                     (z for z in breakdown["zones"] if z.get("confidence") == "active"),
                     None
@@ -299,16 +299,18 @@ async def generate_daily_predictions():
                         vix=vix,
                         db=db,
                         dhan_client=dhan_client,
+                        predicted_drawdown=prediction_value,
                     )
 
                     if trade_result:
                         # Record initial delay price
+                        spread_price = trade_result.get("credit", 0) or trade_result.get("debit", 0)
                         await price_tracker.record_initial_price(
                             trade_id=trade_result["trade_id"],
                             version=version,
                             signal_time=now_ist(),
                             spot=spot,
-                            spread_price=trade_result.get("credit", 0),
+                            spread_price=spread_price,
                             db=db,
                         )
                         logger.info(

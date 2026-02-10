@@ -17,11 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.timezone import now_ist, today_ist
 from config import (
     INITIAL_CAPITAL, NIFTY_LOT_SIZE, RISK_FREE_RATE,
-    MARGIN_PER_LOT_BULL, MARGIN_PER_LOT_IC, VERSION_CONFIGS,
+    MARGIN_PER_LOT_BULL, MARGIN_PER_LOT_IC, MARGIN_PER_LOT_BEAR,
+    VERSION_CONFIGS,
     BULL_OTM_SELL, BULL_OTM_BUY,
 )
 from core.option_pricer import (
     select_strikes, price_bull_put_spread, price_iron_condor,
+    price_bear_put_debit,
     get_next_weekly_expiry, compute_time_to_expiry_years,
     compute_spread_value,
 )
@@ -41,9 +43,10 @@ class TradeManager:
         vix: float,
         db: AsyncSession,
         dhan_client=None,
+        predicted_drawdown: float = None,
     ) -> Optional[dict]:
         """
-        Construct and record a new paper trade.
+        Construct and record a new paper trade (credit or bear debit).
         Returns trade dict or None if trade can't be opened.
         """
         if signal["signal"] == "no_trade" or signal["trade_type"] is None:
@@ -52,76 +55,114 @@ class TradeManager:
         cfg = VERSION_CONFIGS.get(version, {})
         trade_type = signal["trade_type"]
         size_mult = signal["size_mult"]
+        is_bear_debit = (trade_type == "bear_put_debit")
+        bear_tier = signal.get("bear_tier", 0)
 
         # Check concurrent position limits
-        open_count = await self._count_open_trades(db, version, trade_type)
-        max_concurrent = cfg.get("MAX_CONCURRENT_POSITIONS", 3)
-        if trade_type == "iron_condor":
-            max_concurrent = cfg.get("IC_MAX_CONCURRENT", 2)
+        if is_bear_debit:
+            open_count = await self._count_open_trades(db, version, "bear_put_debit")
+            max_concurrent = cfg.get("BEAR_DEBIT_MAX_CONCURRENT", 2)
+        else:
+            open_count = await self._count_open_trades(db, version, trade_type)
+            max_concurrent = cfg.get("MAX_CONCURRENT_POSITIONS", 3)
+            if trade_type == "iron_condor":
+                max_concurrent = cfg.get("IC_MAX_CONCURRENT", 2)
 
         if open_count >= max_concurrent:
             logger.info(f"[{version}] Max concurrent {trade_type} reached ({open_count})")
             return None
 
-        # Check minimum entry gap
-        min_gap = cfg.get("MIN_ENTRY_GAP_DAYS", 2)
-        last_entry = await self._get_last_entry_date(db, version)
-        if last_entry and (today_ist() - last_entry).days < min_gap:
-            logger.info(f"[{version}] Entry gap too small ({(today_ist() - last_entry).days} < {min_gap})")
-            return None
+        # Check minimum entry gap (only for credit trades)
+        if not is_bear_debit:
+            min_gap = cfg.get("MIN_ENTRY_GAP_DAYS", 2)
+            last_entry = await self._get_last_entry_date(db, version)
+            if last_entry and (today_ist() - last_entry).days < min_gap:
+                logger.info(f"[{version}] Entry gap too small ({(today_ist() - last_entry).days} < {min_gap})")
+                return None
 
         # Select strikes
-        strikes = select_strikes(spot, trade_type, {
+        strike_cfg = {
             "BULL_OTM_SELL": BULL_OTM_SELL,
             "BULL_OTM_BUY": BULL_OTM_BUY,
             "IC_PUT_OTM_SELL": cfg.get("IC_PUT_OTM_SELL", 0.03),
             "IC_PUT_OTM_BUY": cfg.get("IC_PUT_OTM_BUY", 0.055),
             "IC_CALL_OTM_SELL": cfg.get("IC_CALL_OTM_SELL", 0.04),
             "IC_CALL_OTM_BUY": cfg.get("IC_CALL_OTM_BUY", 0.065),
-        })
+            "BEAR_PUT_BUY_OTM": cfg.get("BEAR_PUT_BUY_OTM", 0.01),
+            "BEAR_PUT_SELL_OTM": cfg.get("BEAR_PUT_SELL_OTM", 0.04),
+        }
+        strikes = select_strikes(spot, trade_type, strike_cfg)
 
         # Compute expiry
         expiry = get_next_weekly_expiry()
         T = compute_time_to_expiry_years(today_ist(), expiry)
         sigma = vix / 100.0 if vix else 0.15
 
-        # Compute credit
-        if trade_type == "bull_put":
-            credit = price_bull_put_spread(
-                spot, strikes["sell_strike"], strikes["buy_strike"],
+        if is_bear_debit:
+            # Bear put debit: buy higher-strike put, sell lower-strike put
+            debit = price_bear_put_debit(
+                spot, strikes["buy_strike"], strikes["sell_strike"],
                 T, RISK_FREE_RATE, sigma
             )
-        elif trade_type == "iron_condor":
-            credit = price_iron_condor(
-                spot, strikes["sell_strike"], strikes["buy_strike"],
-                strikes["ic_call_sell"], strikes["ic_call_buy"],
-                T, RISK_FREE_RATE, sigma
-            )
+            credit = 0.0
+
+            # Compute lots
+            position_size_pct = cfg.get("POSITION_SIZE_PCT", 0.20)
+            effective_size_pct = position_size_pct * size_mult
+            current_capital = await self._get_current_capital(db, version)
+            max_capital = current_capital * effective_size_pct
+            num_lots = max(1, int(max_capital / MARGIN_PER_LOT_BEAR))
+            num_lots = min(num_lots, 3)  # cap at 3 lots for bear debits
+
+            total_debit = debit * num_lots * NIFTY_LOT_SIZE
+            capital_deployed = num_lots * MARGIN_PER_LOT_BEAR
+
+            # Max profit/loss for bear debit spread
+            spread_width = strikes["buy_strike"] - strikes["sell_strike"]
+            max_profit_per_lot = (spread_width - debit) * NIFTY_LOT_SIZE
+            max_loss_per_lot = debit * NIFTY_LOT_SIZE
+            total_max_profit = max_profit_per_lot * num_lots
+            total_max_loss = max_loss_per_lot * num_lots
+
+            total_credit = 0.0
+            entry_mode = "bear_debit"
         else:
-            credit = 0
+            # Credit trades (bull_put, iron_condor)
+            debit = 0.0
+            if trade_type == "bull_put":
+                credit = price_bull_put_spread(
+                    spot, strikes["sell_strike"], strikes["buy_strike"],
+                    T, RISK_FREE_RATE, sigma
+                )
+            elif trade_type == "iron_condor":
+                credit = price_iron_condor(
+                    spot, strikes["sell_strike"], strikes["buy_strike"],
+                    strikes["ic_call_sell"], strikes["ic_call_buy"],
+                    T, RISK_FREE_RATE, sigma
+                )
+            else:
+                credit = 0
 
-        # Compute lots
-        position_size_pct = cfg.get("POSITION_SIZE_PCT", 0.20)
-        if trade_type == "iron_condor":
-            position_size_pct = cfg.get("IC_POSITION_SIZE_PCT", 0.15)
+            position_size_pct = cfg.get("POSITION_SIZE_PCT", 0.20)
+            if trade_type == "iron_condor":
+                position_size_pct = cfg.get("IC_POSITION_SIZE_PCT", 0.15)
 
-        effective_size_pct = position_size_pct * size_mult
-        margin_per_lot = MARGIN_PER_LOT_BULL if trade_type == "bull_put" else MARGIN_PER_LOT_IC
+            effective_size_pct = position_size_pct * size_mult
+            margin_per_lot = MARGIN_PER_LOT_BULL if trade_type == "bull_put" else MARGIN_PER_LOT_IC
 
-        # Get current capital
-        current_capital = await self._get_current_capital(db, version)
-        max_capital = current_capital * effective_size_pct
-        num_lots = max(1, int(max_capital / margin_per_lot))
+            current_capital = await self._get_current_capital(db, version)
+            max_capital = current_capital * effective_size_pct
+            num_lots = max(1, int(max_capital / margin_per_lot))
 
-        total_credit = credit * num_lots * NIFTY_LOT_SIZE
-        capital_deployed = num_lots * margin_per_lot
+            total_credit = credit * num_lots * NIFTY_LOT_SIZE
+            capital_deployed = num_lots * margin_per_lot
+            total_max_profit = None
+            total_max_loss = None
+            total_debit = 0.0
 
-        # Determine entry mode
-        entry_mode = "normal"
-        if cfg.get("VIX_HARVEST_ENABLED") and vix and vix >= cfg.get("VIX_HARVEST_TRIGGER", 23):
-            entry_mode = "vix_harvest"
-        elif cfg.get("EVENT_CRUSH_ENABLED"):
-            entry_mode = "normal"  # Event detection would be more complex
+            entry_mode = "normal"
+            if cfg.get("VIX_HARVEST_ENABLED") and vix and vix >= cfg.get("VIX_HARVEST_TRIGGER", 23):
+                entry_mode = "vix_harvest"
 
         # Create trade ID
         trade_id = f"{version.replace('.', '')}-{today_ist().isoformat()}-{signal['signal']}"
@@ -149,9 +190,17 @@ class TradeManager:
             current_pnl=0,
             current_pnl_pct=0,
             unrealized_pnl=0,
-            position_size_pct=effective_size_pct,
+            position_size_pct=effective_size_pct if not is_bear_debit else size_mult,
             graduated_mult=size_mult,
             capital_deployed=capital_deployed,
+            # Bear debit fields
+            is_bear_debit=is_bear_debit,
+            bear_tier=bear_tier,
+            entry_debit=debit if is_bear_debit else None,
+            predicted_drawdown=predicted_drawdown,
+            max_profit=total_max_profit,
+            max_loss_amount=total_max_loss,
+            bear_trail_high=0.0,
         )
 
         db.add(trade)
@@ -159,19 +208,32 @@ class TradeManager:
 
         logger.info(
             f"[{version}] Opened {trade_type} trade: {trade_id}, "
-            f"strikes={strikes}, credit={credit:.2f}, lots={num_lots}"
+            f"strikes={strikes}, {'debit' if is_bear_debit else 'credit'}="
+            f"{debit if is_bear_debit else credit:.2f}, lots={num_lots}"
         )
 
-        return {
+        result = {
             "trade_id": trade_id,
             "trade_type": trade_type,
             "strikes": strikes,
-            "credit": credit,
-            "total_credit": total_credit,
             "num_lots": num_lots,
             "entry_mode": entry_mode,
             "expiry": expiry.isoformat(),
         }
+        if is_bear_debit:
+            result.update({
+                "debit": debit,
+                "total_debit": total_debit,
+                "bear_tier": bear_tier,
+                "max_profit": total_max_profit,
+                "max_loss": total_max_loss,
+            })
+        else:
+            result.update({
+                "credit": credit,
+                "total_credit": total_credit,
+            })
+        return result
 
     async def check_exits(self, version: str, spot: float, vix: float,
                            db: AsyncSession) -> list[dict]:
@@ -192,7 +254,10 @@ class TradeManager:
         open_trades = result.scalars().all()
 
         for trade in open_trades:
-            exit_reason = await self._check_single_exit(trade, spot, vix, cfg)
+            if trade.is_bear_debit:
+                exit_reason = await self._check_bear_debit_exit(trade, spot, vix, cfg)
+            else:
+                exit_reason = await self._check_single_exit(trade, spot, vix, cfg)
 
             if exit_reason:
                 closed_info = await self._close_trade(trade, spot, exit_reason, db)
@@ -267,6 +332,64 @@ class TradeManager:
 
         return None
 
+    async def _check_bear_debit_exit(self, trade: Trade, spot: float,
+                                      vix: float, cfg: dict) -> Optional[str]:
+        """Check if a bear debit trade should be exited. Returns exit reason or None."""
+        today = today_ist()
+        dte = (trade.expiry - today).days
+
+        # 1. Expiry exit
+        if dte <= 1:
+            return "expiry"
+
+        # 2. Max hold days
+        hold_days = (today - trade.entry_date).days
+        max_hold = cfg.get("BEAR_DEBIT_MAX_HOLD_DAYS", 8)
+        if hold_days >= max_hold:
+            return "max_hold"
+
+        # 3. Compute current spread value
+        T = max(dte / 365.0, 1 / 365.0)
+        sigma = vix / 100.0 if vix else 0.15
+        current_value = compute_spread_value(
+            "bear_put_debit", spot,
+            trade.sell_strike, trade.buy_strike,
+            None, None, T, RISK_FREE_RATE, sigma
+        )
+
+        entry_debit = trade.entry_debit or 0
+        if entry_debit <= 0:
+            return None
+
+        # PnL ratio: (current_value - entry_debit) / entry_debit
+        pnl_ratio = (current_value - entry_debit) / entry_debit
+
+        # 4. Profit target (e.g., 2x = 100% gain)
+        profit_target = cfg.get("BEAR_DEBIT_PROFIT_TARGET", 2.0)
+        if pnl_ratio >= profit_target - 1.0:  # 2.0 target means 100% gain
+            return "profit_target"
+
+        # 5. Stop loss (e.g., 70% loss of debit)
+        stop_loss = cfg.get("BEAR_DEBIT_STOP_LOSS", 0.70)
+        if pnl_ratio <= -stop_loss:
+            return "stop_loss"
+
+        # 6. Trailing stop
+        trailing_activate = cfg.get("BEAR_DEBIT_TRAILING_ACTIVATE", 1.0)
+        trailing_level = cfg.get("BEAR_DEBIT_TRAILING_LEVEL", 0.30)
+
+        if pnl_ratio >= trailing_activate - 1.0:
+            # Update trail high
+            if current_value > trade.bear_trail_high:
+                trade.bear_trail_high = current_value
+            # Check if pulled back from peak
+            if trade.bear_trail_high > 0:
+                pullback = (trade.bear_trail_high - current_value) / trade.bear_trail_high
+                if pullback >= trailing_level:
+                    return "trailing_stop"
+
+        return None
+
     async def _close_trade(self, trade: Trade, spot: float,
                             exit_reason: str, db: AsyncSession) -> Optional[dict]:
         """Close a trade and record final PnL. Returns trade info dict for notifications."""
@@ -282,8 +405,14 @@ class TradeManager:
             T, RISK_FREE_RATE, sigma
         )
 
-        realized_pnl = (trade.credit_received - current_value) * \
-                        trade.num_lots * NIFTY_LOT_SIZE
+        if trade.is_bear_debit:
+            # Bear debit PnL: (current_value - entry_debit) * lots * lot_size
+            entry_debit = trade.entry_debit or 0
+            realized_pnl = (current_value - entry_debit) * trade.num_lots * NIFTY_LOT_SIZE
+        else:
+            # Credit trade PnL: (credit_received - current_value) * lots * lot_size
+            realized_pnl = (trade.credit_received - current_value) * \
+                            trade.num_lots * NIFTY_LOT_SIZE
 
         pnl_pct = (
             realized_pnl / trade.capital_deployed * 100
@@ -307,7 +436,7 @@ class TradeManager:
         )
 
         # Return trade info for email notifications
-        return {
+        result = {
             "trade_id": trade.trade_id,
             "exit_reason": exit_reason,
             "trade_type": trade.trade_type,
@@ -316,7 +445,10 @@ class TradeManager:
             "pnl_pct": pnl_pct,
             "sell_strike": trade.sell_strike,
             "buy_strike": trade.buy_strike,
+            "is_bear_debit": trade.is_bear_debit,
+            "bear_tier": trade.bear_tier,
         }
+        return result
 
     async def _update_trade_pnl(self, trade: Trade, spot: float,
                                  vix: float, db: AsyncSession):
@@ -330,8 +462,16 @@ class TradeManager:
             T, RISK_FREE_RATE, sigma
         )
 
-        unrealized_pnl = (trade.credit_received - current_value) * \
-                          trade.num_lots * NIFTY_LOT_SIZE
+        if trade.is_bear_debit:
+            entry_debit = trade.entry_debit or 0
+            unrealized_pnl = (current_value - entry_debit) * \
+                              trade.num_lots * NIFTY_LOT_SIZE
+            # Update trail high for trailing stop
+            if current_value > trade.bear_trail_high:
+                trade.bear_trail_high = current_value
+        else:
+            unrealized_pnl = (trade.credit_received - current_value) * \
+                              trade.num_lots * NIFTY_LOT_SIZE
 
         trade.current_spread_value = current_value
         trade.unrealized_pnl = unrealized_pnl

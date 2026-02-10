@@ -63,6 +63,19 @@ def price_iron_condor(S: float, put_sell: float, put_buy: float,
     return max(total_credit, 0)
 
 
+def price_bear_put_debit(S: float, buy_strike: float, sell_strike: float,
+                          T: float, r: float, sigma: float) -> float:
+    """
+    Price a bear put debit spread (buy higher-strike put, sell lower-strike put).
+    Returns net debit paid per share.
+    buy_strike > sell_strike (buy is closer to ATM).
+    """
+    buy_put = bs_put_price(S, buy_strike, T, r, sigma)
+    sell_put = bs_put_price(S, sell_strike, T, r, sigma)
+    debit = buy_put - sell_put
+    return max(debit, 0)
+
+
 def compute_spread_value(trade_type: str, S: float,
                          sell_strike: float, buy_strike: float,
                          ic_call_sell: float = None, ic_call_buy: float = None,
@@ -70,13 +83,18 @@ def compute_spread_value(trade_type: str, S: float,
                          sigma: float = 0.15) -> float:
     """
     Compute current value of a spread given current spot price.
-    This is what it would cost to close the position (buy back).
+    For credit spreads: what it costs to close (buy back).
+    For bear_put_debit: current value of the debit spread (what you could sell for).
     """
     if trade_type == "bull_put":
         return price_bull_put_spread(S, sell_strike, buy_strike, T, r, sigma)
     elif trade_type == "iron_condor" and ic_call_sell and ic_call_buy:
         return price_iron_condor(S, sell_strike, buy_strike,
                                   ic_call_sell, ic_call_buy, T, r, sigma)
+    elif trade_type == "bear_put_debit":
+        # For bear debit: buy_strike is the higher strike (bought put)
+        # sell_strike is the lower strike (sold put)
+        return price_bear_put_debit(S, buy_strike, sell_strike, T, r, sigma)
     else:
         logger.warning(f"Unknown trade type: {trade_type}")
         return 0.0
@@ -113,6 +131,18 @@ def select_strikes(spot: float, trade_type: str, version_cfg: dict) -> dict:
             "buy_strike": put_buy,
             "ic_call_sell": call_sell,
             "ic_call_buy": call_buy,
+        }
+    elif trade_type == "bear_put_debit":
+        # Bear put debit: buy near-ATM put (higher strike), sell OTM put (lower strike)
+        buy_otm = version_cfg.get("BEAR_PUT_BUY_OTM", 0.01)
+        sell_otm = version_cfg.get("BEAR_PUT_SELL_OTM", 0.04)
+        buy_strike = round_strike(spot * (1 - buy_otm))   # near ATM
+        sell_strike = round_strike(spot * (1 - sell_otm))  # further OTM
+        return {
+            "sell_strike": sell_strike,
+            "buy_strike": buy_strike,
+            "ic_call_sell": None,
+            "ic_call_buy": None,
         }
     else:
         return {

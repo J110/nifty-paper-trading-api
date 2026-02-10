@@ -228,7 +228,7 @@ async def get_returns(
 
 def _trade_to_dict(t: Trade) -> dict:
     """Convert Trade ORM object to dict for API response."""
-    return {
+    d = {
         "trade_id": t.trade_id,
         "version": t.version,
         "date": t.date.isoformat() if t.date else None,
@@ -263,4 +263,12 @@ def _trade_to_dict(t: Trade) -> dict:
             (t.exit_date - t.entry_date).days
             if t.exit_date and t.entry_date else None
         ),
+        # Bear debit fields (v6.2+)
+        "is_bear_debit": t.is_bear_debit,
+        "bear_tier": t.bear_tier,
+        "entry_debit": t.entry_debit,
+        "predicted_drawdown": t.predicted_drawdown,
+        "max_profit": t.max_profit,
+        "max_loss_amount": t.max_loss_amount,
     }
+    return d

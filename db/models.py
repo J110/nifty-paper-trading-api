@@ -6,6 +6,7 @@ from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     Float,
@@ -80,6 +81,14 @@ class Trade(Base):
     position_size_pct: Mapped[float] = mapped_column(Float, nullable=False)
     graduated_mult: Mapped[float] = mapped_column(Float, default=1.0)
     capital_deployed: Mapped[float] = mapped_column(Float, nullable=False)
+    # Bear debit spread fields (v6.2+)
+    is_bear_debit: Mapped[bool] = mapped_column(Boolean, default=False)
+    bear_tier: Mapped[int] = mapped_column(Integer, default=0)
+    entry_debit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    predicted_drawdown: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    max_profit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    max_loss_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    bear_trail_high: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
