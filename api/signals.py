@@ -39,16 +39,27 @@ async def get_current_signals(db: AsyncSession = Depends(get_db)):
     daily_feature = feat_result.scalar_one_or_none()
 
     if not prediction:
-        # No prediction today yet — return placeholder
-        return {
-            "timestamp": datetime.now().isoformat(),
-            "nifty_spot": None,
-            "predicted_drawdown": None,
-            "classification": None,
-            "version_signals": {},
-            "indicators": [],
-            "status": "no_prediction_today",
-        }
+        # No prediction today — try most recent prediction
+        fallback_result = await db.execute(
+            select(Prediction).order_by(desc(Prediction.date)).limit(1)
+        )
+        prediction = fallback_result.scalar_one_or_none()
+        if prediction:
+            # Also get the matching daily features
+            feat_result2 = await db.execute(
+                select(DailyFeature).where(DailyFeature.date == prediction.date)
+            )
+            daily_feature = feat_result2.scalar_one_or_none()
+        else:
+            return {
+                "timestamp": datetime.now().isoformat(),
+                "nifty_spot": None,
+                "predicted_drawdown": None,
+                "classification": None,
+                "version_signals": {},
+                "indicators": [],
+                "status": "no_prediction_today",
+            }
 
     # Build classification breakdown
     classification = get_classification_breakdown(prediction.predicted_drawdown)
@@ -82,7 +93,8 @@ async def get_current_signals(db: AsyncSession = Depends(get_db)):
         "version_signals": version_signals,
         "indicators": indicators,
         "confidence_score": prediction.confidence_score,
-        "status": "active",
+        "status": "active" if prediction.date == today else "latest_available",
+        "prediction_date": prediction.date.isoformat(),
     }
 
 
