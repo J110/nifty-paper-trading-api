@@ -131,11 +131,38 @@ async def get_returns(
     result = await db.execute(stmt)
     trades = result.scalars().all()
 
+    # Compute aggregate summary for the filtered trade set
+    # Assumes fresh INITIAL_CAPITAL base (all positions closed before this set)
+    from config import INITIAL_CAPITAL
+
+    total_pnl = sum(t.realized_pnl for t in trades if t.realized_pnl is not None)
+    total_trades = len([t for t in trades if t.realized_pnl is not None])
+    winning = len([t for t in trades if t.realized_pnl is not None and t.realized_pnl > 0])
+    losing_pnl = sum(
+        t.realized_pnl for t in trades
+        if t.realized_pnl is not None and t.realized_pnl < 0
+    )
+    winning_pnl = sum(
+        t.realized_pnl for t in trades
+        if t.realized_pnl is not None and t.realized_pnl > 0
+    )
+
+    summary = {
+        "total_pnl": round(total_pnl, 2),
+        "total_return_pct": round(total_pnl / INITIAL_CAPITAL * 100, 2),
+        "total_trades": total_trades,
+        "win_rate": round(winning / total_trades * 100, 1) if total_trades > 0 else 0,
+        "profit_factor": round(winning_pnl / abs(losing_pnl), 2) if losing_pnl != 0 else 999.0,
+        "avg_pnl": round(total_pnl / total_trades, 2) if total_trades > 0 else 0,
+        "starting_capital": INITIAL_CAPITAL,
+    }
+
     if not trades:
         return {
             "version": version,
             "period": period,
             "data_mode": data_mode,
+            "summary": summary,
             "returns": [],
             "cumulative": [],
         }
@@ -166,8 +193,6 @@ async def get_returns(
         if t.realized_pnl > 0:
             period_groups[key]["wins"] += 1
 
-    from config import INITIAL_CAPITAL
-
     for key in sorted(period_groups.keys()):
         data = period_groups[key]
         cumulative_pnl += data["pnl"]
@@ -191,6 +216,7 @@ async def get_returns(
         "version": version,
         "period": period,
         "data_mode": data_mode,
+        "summary": summary,
         "returns": returns,
         "cumulative": cumulative,
     }
