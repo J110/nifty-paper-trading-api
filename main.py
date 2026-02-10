@@ -124,3 +124,30 @@ async def trigger_prediction():
         "status": "triggered",
         "message": "Prediction pipeline started. Check /api/signals/current in ~30 seconds.",
     }
+
+
+@app.post("/api/backfill")
+async def run_backfill_endpoint():
+    """
+    Run historical backfill from Jan 2026 to today.
+    Populates predictions, trades, and daily PnL for all versions.
+    Takes ~60 seconds. Run once after initial deployment.
+    """
+    from backfill import run_backfill
+    from db.database import async_session_factory
+    import asyncio
+
+    async def _do_backfill():
+        async with async_session_factory() as db:
+            try:
+                result = await run_backfill(db)
+                logger.info(f"Backfill result: {result}")
+            except Exception as e:
+                logger.error(f"Backfill failed: {e}", exc_info=True)
+
+    logger.info("Backfill endpoint triggered")
+    asyncio.create_task(_do_backfill())
+    return {
+        "status": "backfill_started",
+        "message": "Historical backfill running in background. Check /api/signals/history in ~60 seconds.",
+    }
