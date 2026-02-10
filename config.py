@@ -274,7 +274,7 @@ VERSION_CONFIGS = {
 }
 
 # All versions that are actively paper traded
-ACTIVE_VERSIONS = ["v5.4.2", "v5.4.3", "v5.4.4", "v6.2"]
+ACTIVE_VERSIONS = ["v5.4.2", "v5.4.3", "v5.4.4"]
 
 # Model file paths
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ml")
