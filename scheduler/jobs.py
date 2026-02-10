@@ -1,12 +1,15 @@
 """
 Scheduled tasks for the paper trading system.
 Uses APScheduler for cron-based job execution.
+Includes startup recovery: if the server restarts after 9:20 AM IST
+and today's prediction was missed, it auto-runs the pipeline.
 """
 
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, time as dtime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import select, func
 
 from db.database import async_session_factory
 from db.models import Prediction, DailyFeature, DailyPnl, PriceSnapshot
@@ -87,6 +90,58 @@ def setup_scheduler() -> AsyncIOScheduler:
 
     logger.info("Scheduler configured with all jobs")
     return scheduler
+
+
+async def check_and_recover_missed_prediction():
+    """
+    Startup recovery: check if today's daily prediction was missed.
+    If the server restarted after 9:20 AM IST on a weekday and no
+    prediction exists for today, auto-run the prediction pipeline.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        ist = ZoneInfo("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+
+        # Only recover on weekdays during market hours (9:20 AM - 3:30 PM)
+        if now_ist.weekday() >= 5:  # Weekend
+            logger.info("Startup recovery: weekend — skipping")
+            return
+
+        if now_ist.time() < dtime(9, 20):
+            logger.info("Startup recovery: before 9:20 AM — scheduler will handle it")
+            return
+
+        if now_ist.time() > dtime(15, 30):
+            logger.info("Startup recovery: after market close — too late to recover")
+            return
+
+        # Check if today's prediction exists in DB
+        today = date.today()
+        async with async_session_factory() as db:
+            result = await db.execute(
+                select(func.count()).select_from(Prediction).where(
+                    Prediction.date == today
+                )
+            )
+            count = result.scalar() or 0
+
+        if count > 0:
+            logger.info(
+                f"Startup recovery: {count} predictions found for {today} — no action needed"
+            )
+            return
+
+        # No predictions for today — run the pipeline now
+        logger.warning(
+            f"Startup recovery: NO predictions for {today} and it's {now_ist.strftime('%H:%M')} IST. "
+            f"Running missed prediction pipeline..."
+        )
+        await generate_daily_predictions()
+        logger.info("Startup recovery: prediction pipeline completed")
+
+    except Exception as e:
+        logger.error(f"Startup recovery check failed: {e}", exc_info=True)
 
 
 async def record_price_snapshot():

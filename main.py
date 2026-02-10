@@ -15,7 +15,7 @@ from api.signals import router as signals_router
 from api.trades import router as trades_router
 from api.charts import router as charts_router
 from api.returns import router as returns_router
-from scheduler.jobs import setup_scheduler
+from scheduler.jobs import setup_scheduler, check_and_recover_missed_prediction
 
 # Configure logging
 logging.basicConfig(
@@ -45,6 +45,10 @@ async def lifespan(app: FastAPI):
     scheduler = setup_scheduler()
     scheduler.start()
     logger.info("APScheduler started")
+
+    # Check if we missed today's prediction (server restart recovery)
+    import asyncio
+    asyncio.create_task(check_and_recover_missed_prediction())
 
     yield
 
@@ -80,11 +84,41 @@ app.include_router(returns_router)
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint for Render."""
+    """Health check endpoint for Render + UptimeRobot pinger."""
+    from datetime import date, datetime
+    from sqlalchemy import select, func
+    from db.database import async_session_factory
+    from db.models import Prediction
+
+    # Quick DB check: is today's prediction present?
+    today_predictions = 0
+    last_prediction_date = None
+    try:
+        async with async_session_factory() as db:
+            result = await db.execute(
+                select(func.count()).select_from(Prediction).where(
+                    Prediction.date == date.today()
+                )
+            )
+            today_predictions = result.scalar() or 0
+
+            result2 = await db.execute(
+                select(func.max(Prediction.date))
+            )
+            last_prediction_date = result2.scalar()
+    except Exception:
+        pass  # Don't fail health check if DB is slow
+
+    scheduler_running = scheduler is not None and scheduler.running
+
     return {
         "status": "healthy",
         "service": "nifty-paper-trading-api",
         "version": "1.0.0",
+        "scheduler_running": scheduler_running,
+        "today_predictions": today_predictions,
+        "last_prediction_date": last_prediction_date.isoformat() if last_prediction_date else None,
+        "server_time": datetime.now().isoformat(),
     }
 
 
