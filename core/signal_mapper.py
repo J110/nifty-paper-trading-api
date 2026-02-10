@@ -1,38 +1,49 @@
 """
 Maps model prediction to trade signal for each version.
 Replicates signal mapping from the backtest code exactly.
+
+Backtest thresholds (from nifty_options_model/config.py):
+  DRAWDOWN_BULL_FULL  = -0.038  (-3.8%)
+  DRAWDOWN_BULL_HALF  = -0.050  (-5.0%)
+  DRAWDOWN_IRON_CONDOR = -0.065 (-6.5%)
 """
 
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Thresholds (as decimals: -0.015 = -1.5%)
-THRESH_BULL_FULL = -0.015
-THRESH_BULL_HALF = -0.025
-THRESH_IC = -0.035
+# Thresholds (as decimals) — aligned with backtest config
+THRESH_BULL_FULL = -0.038   # -3.8%
+THRESH_BULL_HALF = -0.050   # -5.0%
+THRESH_IC = -0.065          # -6.5%
+
+# In percentage terms (for use in functions that work with %)
+T1_PCT = THRESH_BULL_FULL * 100   # -3.8
+T2_PCT = THRESH_BULL_HALF * 100   # -5.0
+T3_PCT = THRESH_IC * 100          # -6.5
 
 
 def map_signal_sharp(pred: float) -> dict:
     """
     v5.4.2: Sharp threshold signal mapping.
     No transition zones — hard cutoffs at each boundary.
+    Matches backtest model_signal() function exactly.
     """
     pred_pct = pred * 100  # e.g., -0.012 → -1.2
 
-    if pred_pct > -1.5:
+    if pred_pct > T1_PCT:
         return {
             "signal": "bull_full",
             "size_mult": 1.0,
             "trade_type": "bull_put",
         }
-    elif pred_pct > -2.5:
+    elif pred_pct > T2_PCT:
         return {
             "signal": "bull_half",
             "size_mult": 1.0,
             "trade_type": "bull_put",
         }
-    elif pred_pct > -3.5:
+    elif pred_pct > T3_PCT:
         return {
             "signal": "iron_condor",
             "size_mult": 1.0,
@@ -49,18 +60,19 @@ def map_signal_sharp(pred: float) -> dict:
 def map_signal_graduated(pred: float, floor: float = 0.50,
                           hw: float = 0.50) -> dict:
     """
-    v5.4.3: Graduated signal mapping with configurable floor and half-width.
+    v5.4.3 / v5.4.4: Graduated signal mapping with configurable floor and half-width.
     Smooth transitions between zones instead of hard cutoffs.
 
     floor: minimum size multiplier (0.5 = always at least 50% position)
     hw: transition half-width in percentage points (0.5 = ±0.5% transition zone)
+
+    Uses backtest thresholds: -3.8% / -5.0% / -6.5%
     """
     pred_pct = pred * 100  # -0.012 → -1.2
 
-    # Thresholds in % terms
-    t1 = -1.5  # bull_full / bull_half boundary
-    t2 = -2.5  # bull_half / iron_condor boundary
-    t3 = -3.5  # iron_condor / no_trade boundary
+    t1 = T1_PCT  # -3.8
+    t2 = T2_PCT  # -5.0
+    t3 = T3_PCT  # -6.5
 
     if pred_pct > t1 + hw:
         # Fully in bull_full zone
@@ -71,7 +83,6 @@ def map_signal_graduated(pred: float, floor: float = 0.50,
         }
     elif pred_pct > t1 - hw:
         # Transition: bull_full → bull_half
-        # Linear interpolation from 1.0 to floor
         progress = (t1 + hw - pred_pct) / (2 * hw)
         mult = 1.0 - progress * (1.0 - floor)
         return {
@@ -88,8 +99,8 @@ def map_signal_graduated(pred: float, floor: float = 0.50,
         }
     elif pred_pct > t2 - hw:
         # Transition: bull_half → iron_condor
-        progress = (t2 + hw - pred_pct) / (2 * hw)
-        mult = floor - progress * (floor - floor)
+        progress = (t2 + hw - pred_pct) / (2 * hw) if hw > 0 else 0
+        mult = floor
         return {
             "signal": "iron_condor",
             "size_mult": round(max(mult, floor), 3),
@@ -104,7 +115,7 @@ def map_signal_graduated(pred: float, floor: float = 0.50,
         }
     elif pred_pct > t3 - hw:
         # Transition: iron_condor → no_trade
-        progress = (t3 + hw - pred_pct) / (2 * hw)
+        progress = (t3 + hw - pred_pct) / (2 * hw) if hw > 0 else 0
         mult = floor * (1.0 - progress)
         return {
             "signal": "iron_condor" if mult > 0.1 else "no_trade",
@@ -127,12 +138,11 @@ def map_signal_directional_bear(pred: float, version_cfg: dict) -> dict:
     """
     floor = version_cfg.get("GRADUATED_FLOOR", 0.80)
     hw_pct = version_cfg.get("GRADUATED_HW", 0.25)  # in percentage points
-    hw = hw_pct / 100.0  # convert to decimal
 
-    # Thresholds in decimal (match backtest config thresholds)
-    t1 = -0.015   # bull_full / bull_half
-    t2 = -0.025   # bull_half / iron_condor
-    t3 = -0.035   # iron_condor / no_trade (bear debit threshold)
+    t1 = THRESH_BULL_FULL   # -0.038
+    t2 = THRESH_BULL_HALF   # -0.050
+    t3 = THRESH_IC          # -0.065
+    hw = hw_pct / 100.0     # convert to decimal
 
     bear_threshold = version_cfg.get("BEAR_DEBIT_THRESHOLD", -0.065)
     bear_strong = version_cfg.get("BEAR_STRONG_THRESHOLD", -0.090)
@@ -162,7 +172,6 @@ def map_signal_directional_bear(pred: float, version_cfg: dict) -> dict:
         if mult > 0.1:
             return {"signal": "iron_condor", "size_mult": round(mult, 3),
                     "trade_type": "iron_condor", "bear_tier": 0}
-        # Fall through to bear debit
         pass
 
     # Below IC threshold: bear debit zone
@@ -213,52 +222,55 @@ def get_classification_breakdown(pred: float, version: str = None) -> dict:
     from each classification boundary.
     Returns confidence scores for each zone.
 
-    For v6.2+, shows 7 zones (splits "No Trade" into Bear Moderate + Bear Strong).
-    For older versions, shows 6 zones.
+    Zone ranges aligned with backtest thresholds:
+      Bull Full:  > -3.8%
+      Bull Half:  -3.8% to -5.0%
+      Iron Condor: -5.0% to -6.5%
+      No Trade:   < -6.5%
     """
     pred_pct = pred * 100  # e.g., -1.23
 
-    # Base zones (shared by all versions)
+    # Base zones (aligned with backtest thresholds)
     zones = [
         {
             "name": "Strong Bull",
-            "range": "0.0% to -0.5%",
+            "range": "0.0% to -1.5%",
             "color": "#00E676",
-            "active": pred_pct > -0.5,
-            "min": -0.5,
+            "active": pred_pct > -1.5,
+            "min": -1.5,
             "max": 0.0,
         },
         {
             "name": "Moderate Bull",
-            "range": "-0.5% to -1.0%",
-            "color": "#66BB6A",
-            "active": -1.0 < pred_pct <= -0.5,
-            "min": -1.0,
-            "max": -0.5,
-        },
-        {
-            "name": "Bull (Full Position)",
-            "range": "-1.0% to -1.5%",
-            "color": "#A5D6A7",
-            "active": -1.5 < pred_pct <= -1.0,
-            "min": -1.5,
-            "max": -1.0,
-        },
-        {
-            "name": "Bull (Half Position)",
             "range": "-1.5% to -2.5%",
-            "color": "#FFD54F",
+            "color": "#66BB6A",
             "active": -2.5 < pred_pct <= -1.5,
             "min": -2.5,
             "max": -1.5,
         },
         {
-            "name": "Iron Condor",
-            "range": "-2.5% to -3.5%",
-            "color": "#FF9800",
-            "active": -3.5 < pred_pct <= -2.5,
-            "min": -3.5,
+            "name": "Bull (Full Position)",
+            "range": "-2.5% to -3.8%",
+            "color": "#A5D6A7",
+            "active": T1_PCT < pred_pct <= -2.5,
+            "min": T1_PCT,
             "max": -2.5,
+        },
+        {
+            "name": "Bull (Half Position)",
+            "range": f"{T1_PCT}% to {T2_PCT}%",
+            "color": "#FFD54F",
+            "active": T2_PCT < pred_pct <= T1_PCT,
+            "min": T2_PCT,
+            "max": T1_PCT,
+        },
+        {
+            "name": "Iron Condor",
+            "range": f"{T2_PCT}% to {T3_PCT}%",
+            "color": "#FF9800",
+            "active": T3_PCT < pred_pct <= T2_PCT,
+            "min": T3_PCT,
+            "max": T2_PCT,
         },
     ]
 
@@ -268,11 +280,11 @@ def get_classification_breakdown(pred: float, version: str = None) -> dict:
         zones.extend([
             {
                 "name": "Bear Moderate",
-                "range": "-3.5% to -9.0%",
+                "range": f"{T3_PCT}% to -9.0%",
                 "color": "#EF5350",
-                "active": -9.0 < pred_pct <= -3.5,
+                "active": -9.0 < pred_pct <= T3_PCT,
                 "min": -9.0,
-                "max": -3.5,
+                "max": T3_PCT,
             },
             {
                 "name": "Bear Strong",
@@ -286,11 +298,11 @@ def get_classification_breakdown(pred: float, version: str = None) -> dict:
     else:
         zones.append({
             "name": "No Trade (Bear)",
-            "range": "-3.5% to -8.0%",
+            "range": f"{T3_PCT}% to -10.0%",
             "color": "#EF5350",
-            "active": pred_pct <= -3.5,
-            "min": -8.0,
-            "max": -3.5,
+            "active": pred_pct <= T3_PCT,
+            "min": -10.0,
+            "max": T3_PCT,
         })
 
     # Find active zone and compute distances

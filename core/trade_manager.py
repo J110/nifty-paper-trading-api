@@ -102,7 +102,7 @@ class TradeManager:
             # Bear put debit: buy higher-strike put, sell lower-strike put
             debit = price_bear_put_debit(
                 spot, strikes["buy_strike"], strikes["sell_strike"],
-                T, RISK_FREE_RATE, sigma
+                T, RISK_FREE_RATE, sigma, apply_slippage=True
             )
             credit = 0.0
 
@@ -132,13 +132,13 @@ class TradeManager:
             if trade_type == "bull_put":
                 credit = price_bull_put_spread(
                     spot, strikes["sell_strike"], strikes["buy_strike"],
-                    T, RISK_FREE_RATE, sigma
+                    T, RISK_FREE_RATE, sigma, apply_slippage=True
                 )
             elif trade_type == "iron_condor":
                 credit = price_iron_condor(
                     spot, strikes["sell_strike"], strikes["buy_strike"],
                     strikes["ic_call_sell"], strikes["ic_call_buy"],
-                    T, RISK_FREE_RATE, sigma
+                    T, RISK_FREE_RATE, sigma, apply_slippage=True
                 )
             else:
                 credit = 0
@@ -260,7 +260,7 @@ class TradeManager:
                 exit_reason = await self._check_single_exit(trade, spot, vix, cfg)
 
             if exit_reason:
-                closed_info = await self._close_trade(trade, spot, exit_reason, db)
+                closed_info = await self._close_trade(trade, spot, exit_reason, db, vix=vix)
                 if closed_info:
                     closed_trades.append(closed_info)
             else:
@@ -271,7 +271,16 @@ class TradeManager:
 
     async def _check_single_exit(self, trade: Trade, spot: float,
                                   vix: float, cfg: dict) -> Optional[str]:
-        """Check if a single trade should be exited. Returns exit reason or None."""
+        """
+        Check if a single credit trade should be exited. Returns exit reason or None.
+
+        Matches backtest exit hierarchy:
+        1. Expiry (DTE ≤ 1)
+        2. Profit target (day-count stages: ≤3 / 4-7 / ≥8)
+        3. Trailing stop (DB-persisted peak_pnl_pct)
+        4. Stop loss (with N-day confirmation, DB-persisted breach counter)
+        5. DTE expiry
+        """
         today = today_ist()
         dte = (trade.expiry - today).days
 
@@ -294,13 +303,11 @@ class TradeManager:
         pnl_per_unit = trade.credit_received - current_value
         pnl_pct = pnl_per_unit / trade.credit_received if trade.credit_received > 0 else 0
 
-        # 3. Profit target (varies by DTE stage)
-        entry_dte = (trade.expiry - trade.entry_date).days
-        elapsed_pct = 1 - (dte / max(entry_dte, 1))
-
-        if elapsed_pct < 0.4:
+        # 3. Profit target — day-count stages matching backtest
+        days_held = (today - trade.entry_date).days
+        if days_held <= 3:
             pt = cfg.get("PROFIT_TARGET_EARLY", 0.50)
-        elif elapsed_pct < 0.7:
+        elif days_held <= 7:
             pt = cfg.get("PROFIT_TARGET_MID", 0.65)
         else:
             pt = cfg.get("PROFIT_TARGET_LATE", 0.80)
@@ -308,27 +315,34 @@ class TradeManager:
         if pnl_pct >= pt:
             return "profit_target"
 
-        # 4. Stop loss
-        sl_mult = cfg.get("STOP_LOSS_MULTIPLIER", 3.0)
-        if trade.trade_type == "iron_condor":
-            sl_mult = cfg.get("IC_STOP_LOSS_MULTIPLIER", 3.0)
-
-        max_loss = trade.credit_received * sl_mult
-        if current_value >= max_loss + trade.credit_received:
-            return "stop_loss"
-
-        # 5. Trailing stop
+        # 4. Trailing stop — DB-persisted peak tracking
         trailing_activate = cfg.get("TRAILING_STOP_ACTIVATE", 0.40)
         trailing_level = cfg.get("TRAILING_STOP_LEVEL", 0.10)
 
         if pnl_pct >= trailing_activate:
-            # Check if price has pulled back enough from peak
-            if hasattr(trade, '_peak_pnl_pct'):
-                if pnl_pct < trade._peak_pnl_pct - trailing_level:
-                    return "trailing_stop"
-            trade._peak_pnl_pct = max(
-                getattr(trade, '_peak_pnl_pct', 0), pnl_pct
-            )
+            peak = trade.peak_pnl_pct or 0.0
+            if peak > 0 and pnl_pct < peak - trailing_level:
+                return "trailing_stop"
+            trade.peak_pnl_pct = max(peak, pnl_pct)
+
+        # 5. Stop loss — with N-day confirmation matching backtest
+        sl_mult = cfg.get("STOP_LOSS_MULTIPLIER", 3.0)
+        if trade.trade_type == "iron_condor":
+            sl_mult = cfg.get("IC_STOP_LOSS_MULTIPLIER", 3.0)
+
+        confirm_days = cfg.get("STOP_LOSS_CONFIRM_DAYS", 1)
+        if trade.trade_type == "iron_condor":
+            confirm_days = cfg.get("IC_STOP_LOSS_CONFIRM_DAYS", 1)
+
+        max_loss = trade.credit_received * sl_mult
+        if current_value >= max_loss + trade.credit_received:
+            # Breach detected — increment counter
+            trade.stop_loss_breach_days = (trade.stop_loss_breach_days or 0) + 1
+            if trade.stop_loss_breach_days >= confirm_days:
+                return "stop_loss"
+        else:
+            # Recovery — reset breach counter
+            trade.stop_loss_breach_days = 0
 
         return None
 
@@ -391,13 +405,14 @@ class TradeManager:
         return None
 
     async def _close_trade(self, trade: Trade, spot: float,
-                            exit_reason: str, db: AsyncSession) -> Optional[dict]:
+                            exit_reason: str, db: AsyncSession,
+                            vix: float = None) -> Optional[dict]:
         """Close a trade and record final PnL. Returns trade info dict for notifications."""
         now = now_ist()
 
         # Compute final PnL
         T = max((trade.expiry - today_ist()).days / 365.0, 1 / 365.0)
-        sigma = 0.15  # Approximate; in production use live VIX
+        sigma = vix / 100.0 if vix else 0.15
         current_value = compute_spread_value(
             trade.trade_type, spot,
             trade.sell_strike, trade.buy_strike,
