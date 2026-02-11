@@ -185,35 +185,11 @@ async def generate_daily_predictions():
 
         logger.info(f"Live data: Nifty={spot}, VIX={vix}")
 
-        # Get historical data for feature computation
+        # Build features from parquet (historical_df is not used for features)
+        # The feature engine reads directly from merged_daily.parquet
         import pandas as pd
-        historical_raw = await dhan_client.get_historical_ohlc(days=365)
+        historical_df = pd.DataFrame()  # Not used by build_live_features
 
-        # Parse historical data into DataFrame
-        if historical_raw and isinstance(historical_raw, dict):
-            ohlc_data = historical_raw.get("data", [])
-        elif isinstance(historical_raw, list):
-            ohlc_data = historical_raw
-        else:
-            ohlc_data = []
-
-        if ohlc_data:
-            historical_df = pd.DataFrame(ohlc_data)
-            # Normalize column names
-            col_map = {
-                "open": "open", "high": "high", "low": "low",
-                "close": "close", "volume": "volume",
-                "start_Time": "date", "timestamp": "date",
-            }
-            historical_df.rename(columns=col_map, inplace=True)
-        else:
-            # Fallback: use yfinance
-            import yfinance as yf
-            nifty = yf.download("^NSEI", period="1y", progress=False)
-            historical_df = nifty.reset_index()
-            historical_df.columns = [c.lower() for c in historical_df.columns]
-
-        # Build features
         option_chain = None
         try:
             from core.option_pricer import get_next_weekly_expiry
