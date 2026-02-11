@@ -201,6 +201,70 @@ async def trigger_prediction():
     }
 
 
+@app.get("/api/debug/pipeline-test")
+async def debug_pipeline_test():
+    """Test each step of the prediction pipeline independently."""
+    import traceback
+    import os
+    results = {}
+
+    # Step 1: Check parquet file
+    try:
+        from core.feature_engine import MERGED_DAILY_PATH, DHAN_RAW_PATH, DHAN_SKEW_PATH
+        import pandas as pd
+        results["parquet_exists"] = os.path.exists(MERGED_DAILY_PATH)
+        results["parquet_path"] = MERGED_DAILY_PATH
+        if results["parquet_exists"]:
+            df = pd.read_parquet(MERGED_DAILY_PATH)
+            results["parquet_rows"] = len(df)
+            results["parquet_last_date"] = str(df.index[-1].date())
+        results["dhan_raw_exists"] = os.path.exists(DHAN_RAW_PATH)
+        results["dhan_skew_exists"] = os.path.exists(DHAN_SKEW_PATH)
+    except Exception as e:
+        results["parquet_error"] = f"{e}\n{traceback.format_exc()}"
+
+    # Step 2: Check Dhan API
+    try:
+        from core.dhan_client import DhanClient
+        dc = DhanClient()
+        spot = await dc.get_nifty_ltp()
+        vix = await dc.get_india_vix()
+        results["dhan_spot"] = spot
+        results["dhan_vix"] = vix
+    except Exception as e:
+        results["dhan_error"] = f"{e}\n{traceback.format_exc()}"
+
+    # Step 3: Build features
+    try:
+        from core.feature_engine import build_live_features
+        features = await build_live_features(dc, None, None)
+        results["features_count"] = len(features) if features else 0
+        results["features_sample"] = {k: features[k] for k in list(features.keys())[:5]} if features else {}
+    except Exception as e:
+        results["features_error"] = f"{e}\n{traceback.format_exc()}"
+
+    # Step 4: Model prediction
+    try:
+        from core.model_runner import ModelRunner
+        from config import DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH
+        mr = ModelRunner(DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH)
+        if 'features_error' not in results:
+            pred = mr.predict(features)
+            results["prediction"] = float(pred)
+            results["prediction_pct"] = f"{pred*100:.2f}%"
+        else:
+            results["model_skipped"] = "Features failed"
+    except Exception as e:
+        results["model_error"] = f"{e}\n{traceback.format_exc()}"
+
+    # Step 5: Check today_ist
+    from core.timezone import today_ist, now_ist
+    results["today_ist"] = str(today_ist())
+    results["now_ist"] = str(now_ist())
+
+    return results
+
+
 @app.post("/api/backfill")
 async def run_backfill_endpoint():
     """
