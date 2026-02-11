@@ -168,15 +168,12 @@ async def trigger_prediction():
     except Exception:
         pass
 
+    error_info = None
     try:
         await generate_daily_predictions()
     except Exception as e:
         logger.error(f"Manual trigger failed: {e}", exc_info=True)
-        return {
-            "status": "error",
-            "error": str(e),
-            "traceback": traceback.format_exc(),
-        }
+        error_info = {"error": str(e), "traceback": traceback.format_exc()}
 
     # Count predictions after
     after_count = 0
@@ -191,14 +188,17 @@ async def trigger_prediction():
     except Exception:
         pass
 
-    return {
-        "status": "success" if after_count > before_count else "warning",
+    result = {
+        "status": "error" if error_info else ("success" if after_count > before_count else "warning"),
         "message": f"Pipeline completed. Predictions for {today_ist()}: {before_count} -> {after_count}",
         "today_date": str(today_ist()),
         "server_time": str(now_ist()),
         "predictions_before": before_count,
         "predictions_after": after_count,
     }
+    if error_info:
+        result.update(error_info)
+    return result
 
 
 @app.get("/api/debug/pipeline-test")
