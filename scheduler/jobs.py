@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, date, time as dtime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 
 from db.database import async_session_factory
 from db.models import Prediction, DailyFeature, DailyPnl, PriceSnapshot
@@ -244,7 +244,10 @@ async def generate_daily_predictions():
 
         # Store in DB
         async with async_session_factory() as db:
-            # Store features
+            # Upsert daily features (delete old row if exists, then insert)
+            await db.execute(
+                delete(DailyFeature).where(DailyFeature.date == today_ist())
+            )
             daily_feature = DailyFeature(
                 date=today_ist(),
                 features=features,
@@ -260,6 +263,11 @@ async def generate_daily_predictions():
                 adx_14=features.get("adx_14"),
             )
             db.add(daily_feature)
+
+            # Clean up any existing predictions for today (from failed earlier runs)
+            await db.execute(
+                delete(Prediction).where(Prediction.date == today_ist())
+            )
 
             # Process each version
             for version in ACTIVE_VERSIONS:
