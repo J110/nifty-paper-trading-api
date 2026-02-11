@@ -1,14 +1,15 @@
 """API routes for trades, portfolio, and delay analysis."""
 
-from datetime import date
+from datetime import date, timedelta
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
-from db.models import Trade, DelayPrice
+from db.models import Trade, DelayPrice, Prediction
 from core.trade_manager import TradeManager
 from core.price_tracker import PriceTracker
+from core.signal_mapper import map_signal
 from config import ACTIVE_VERSIONS, VERSION_CONFIGS
 
 router = APIRouter(prefix="/api")
@@ -223,6 +224,63 @@ async def get_returns(
         "summary": summary,
         "returns": returns,
         "cumulative": cumulative,
+    }
+
+
+@router.get("/trades/{version}/recommendations")
+async def get_recommendations(
+    version: str,
+    from_date: str | None = Query(None, regex=r"^\d{4}-\d{2}-\d{2}$"),
+    to_date: str | None = Query(None, regex=r"^\d{4}-\d{2}-\d{2}$"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns trade recommendations (daily predictions mapped to version-specific signals).
+    Each row = one trading day with the model's prediction and the resulting trade recommendation.
+    """
+    if version not in ACTIVE_VERSIONS:
+        return {"error": f"Unknown version: {version}"}
+
+    cfg = VERSION_CONFIGS[version]
+
+    # Get predictions — one prediction per date (any version, same model)
+    stmt = select(Prediction).order_by(Prediction.date)
+
+    if from_date:
+        stmt = stmt.where(Prediction.date >= date.fromisoformat(from_date))
+    if to_date:
+        stmt = stmt.where(Prediction.date <= date.fromisoformat(to_date))
+
+    result = await db.execute(stmt)
+    all_predictions = result.scalars().all()
+
+    # De-duplicate by date (keep first per date since all versions have same prediction)
+    seen_dates = set()
+    predictions = []
+    for p in all_predictions:
+        if p.date not in seen_dates:
+            seen_dates.add(p.date)
+            predictions.append(p)
+
+    recommendations = []
+    for p in predictions:
+        signal = map_signal(p.predicted_drawdown, cfg)
+        recommendations.append({
+            "date": p.date.isoformat(),
+            "predicted_drawdown_pct": round(p.predicted_drawdown * 100, 2),
+            "signal": signal["signal"],
+            "trade_type": signal["trade_type"],
+            "size_mult": signal["size_mult"],
+            "nifty_spot": p.nifty_spot,
+            "vix": p.vix,
+            "confidence_score": p.confidence_score,
+        })
+
+    return {
+        "version": version,
+        "label": cfg.get("label", version),
+        "count": len(recommendations),
+        "recommendations": recommendations,
     }
 
 

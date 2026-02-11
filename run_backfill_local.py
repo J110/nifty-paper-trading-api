@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 # ── Config ───────────────────────────────────────────────────────────
 DB_URL = "postgresql://neondb_owner:npg_g8DMmJ3XByNF@ep-flat-tree-a1bahirx-pooler.ap-southeast-1.aws.neon.tech/neondb"
-BACKFILL_START = "2026-01-01"
+BACKFILL_START = "2024-01-01"
 
 # Version mapping: display version → config profile name
 VERSION_MAP = {
