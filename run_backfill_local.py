@@ -170,12 +170,12 @@ async def run_backfill():
                     pred_date = datetime.strptime(pred_date, "%Y-%m-%d").date()
 
                 vix = float(pred.get('vix', 0))
+                # Use feature matrix (computed features) for display indicators
                 features_dict = {}
-                if merged_daily is not None:
-                    ts_key = pd.Timestamp(pred_date)
-                    if ts_key in merged_daily.index:
-                        row = merged_daily.loc[ts_key]
-                        features_dict = {c: float(row[c]) for c in row.index if not pd.isna(row[c])}
+                ts_key = pd.Timestamp(pred_date)
+                if ts_key in df.index:
+                    row = df.loc[ts_key]
+                    features_dict = {c: float(row[c]) for c in row.index if not pd.isna(row[c])}
 
                 await conn.execute("""
                     INSERT INTO daily_features (date, features, vix, vix_20d_avg, nifty_20d_return,
