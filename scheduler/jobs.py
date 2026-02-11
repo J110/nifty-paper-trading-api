@@ -179,13 +179,9 @@ async def generate_daily_predictions():
     logger.info("=== Starting daily prediction pipeline ===")
 
     try:
-        # Fetch live data
+        # Fetch live data (best-effort — features come from parquet, not live prices)
         spot = await dhan_client.get_nifty_ltp()
         vix = await dhan_client.get_india_vix()
-
-        if spot is None:
-            logger.error("Cannot generate predictions: no Nifty price")
-            return
 
         logger.info(f"Live data: Nifty={spot}, VIX={vix}")
 
@@ -229,6 +225,14 @@ async def generate_daily_predictions():
         features = await build_live_features(
             dhan_client, historical_df, option_chain
         )
+
+        # Fallback: use parquet data if live prices unavailable
+        if spot is None:
+            spot = features.get("nifty_close", 0)
+            logger.warning(f"Using parquet close as spot fallback: {spot}")
+        if vix is None:
+            vix = features.get("india_vix", 0)
+            logger.warning(f"Using parquet VIX as vix fallback: {vix}")
 
         # Run model prediction
         prediction_value = model_runner.predict(features)
