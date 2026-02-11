@@ -220,96 +220,112 @@ async def generate_daily_predictions():
 
         # Store in DB
         async with async_session_factory() as db:
-            # Upsert daily features (delete old row if exists, then insert)
-            await db.execute(
-                delete(DailyFeature).where(DailyFeature.date == today_ist())
-            )
-            daily_feature = DailyFeature(
-                date=today_ist(),
-                features=features,
-                vix=features.get("vix"),
-                vix_20d_avg=features.get("vix_20d_avg"),
-                nifty_20d_return=features.get("nifty_20d_return"),
-                nifty_50d_return=features.get("nifty_50d_return"),
-                iv_skew=features.get("iv_skew"),
-                fii_net=features.get("fii_net_5d"),
-                dii_net=features.get("dii_net_5d"),
-                put_call_ratio=features.get("put_call_ratio"),
-                rsi_14=features.get("rsi_14"),
-                adx_14=features.get("adx_14"),
-            )
-            db.add(daily_feature)
-
-            # Clean up any existing predictions for today (from failed earlier runs)
-            await db.execute(
-                delete(Prediction).where(Prediction.date == today_ist())
-            )
-
-            # Process each version
-            for version in ACTIVE_VERSIONS:
-                cfg = VERSION_CONFIGS[version]
-                signal = map_signal(prediction_value, cfg)
-
-                # Track for no-trade check
-                all_version_signals.append({
-                    "version": version,
-                    "signal": signal["signal"],
-                })
-
-                # Compute confidence score (distance from nearest boundary)
-                breakdown = get_classification_breakdown(prediction_value, version=version)
-                active_zone = next(
-                    (z for z in breakdown["zones"] if z.get("confidence") == "active"),
-                    None
+            try:
+                # Upsert daily features (delete old row if exists, then insert)
+                await db.execute(
+                    delete(DailyFeature).where(DailyFeature.date == today_ist())
                 )
-                confidence = active_zone["distance_to_boundary"] if active_zone else 0
-
-                # Store prediction
-                pred = Prediction(
+                daily_feature = DailyFeature(
                     date=today_ist(),
-                    timestamp=now_ist(),
-                    predicted_drawdown=prediction_value,
-                    signal_type=signal["signal"],
-                    version=version,
-                    nifty_spot=spot,
-                    vix=vix,
-                    confidence_score=confidence,
-                    graduated_mult=signal["size_mult"],
                     features=features,
+                    vix=features.get("vix"),
+                    vix_20d_avg=features.get("vix_20d_avg"),
+                    nifty_20d_return=features.get("nifty_20d_return"),
+                    nifty_50d_return=features.get("nifty_50d_return"),
+                    iv_skew=features.get("iv_skew"),
+                    fii_net=features.get("fii_net_5d"),
+                    dii_net=features.get("dii_net_5d"),
+                    put_call_ratio=features.get("put_call_ratio"),
+                    rsi_14=features.get("rsi_14"),
+                    adx_14=features.get("adx_14"),
                 )
-                db.add(pred)
+                db.add(daily_feature)
+                await db.flush()  # Flush features first to detect errors early
+                logger.info("Daily features stored")
 
-                # Open trade if signal says so
-                if signal["signal"] != "no_trade":
-                    trade_result = await trade_manager.open_trade(
-                        signal=signal,
-                        version=version,
-                        spot=spot,
-                        vix=vix,
-                        db=db,
-                        dhan_client=dhan_client,
-                        predicted_drawdown=prediction_value,
+                # Clean up any existing predictions for today (from failed earlier runs)
+                await db.execute(
+                    delete(Prediction).where(Prediction.date == today_ist())
+                )
+
+                # Process each version
+                for version in ACTIVE_VERSIONS:
+                    cfg = VERSION_CONFIGS[version]
+                    signal = map_signal(prediction_value, cfg)
+
+                    # Track for no-trade check
+                    all_version_signals.append({
+                        "version": version,
+                        "signal": signal["signal"],
+                    })
+
+                    # Compute confidence score (distance from nearest boundary)
+                    breakdown = get_classification_breakdown(prediction_value, version=version)
+                    active_zone = next(
+                        (z for z in breakdown["zones"] if z.get("confidence") == "active"),
+                        None
                     )
+                    confidence = active_zone["distance_to_boundary"] if active_zone else 0
 
-                    if trade_result:
-                        # Record initial delay price
-                        spread_price = trade_result.get("credit", 0) or trade_result.get("debit", 0)
-                        await price_tracker.record_initial_price(
-                            trade_id=trade_result["trade_id"],
-                            version=version,
-                            signal_time=now_ist(),
-                            spot=spot,
-                            spread_price=spread_price,
-                            db=db,
-                        )
-                        logger.info(
-                            f"[{version}] Opened trade: {trade_result['trade_id']}"
-                        )
+                    # Store prediction
+                    pred = Prediction(
+                        date=today_ist(),
+                        timestamp=now_ist(),
+                        predicted_drawdown=prediction_value,
+                        signal_type=signal["signal"],
+                        version=version,
+                        nifty_spot=spot,
+                        vix=vix,
+                        confidence_score=confidence,
+                        graduated_mult=signal["size_mult"],
+                        features=features,
+                    )
+                    db.add(pred)
+                    logger.info(f"[{version}] signal={signal['signal']}, size={signal['size_mult']}")
 
-                        # ===== EMAIL: Trade opened =====
-                        trades_opened.append((version, signal, trade_result))
+                await db.flush()  # Flush all predictions
+                logger.info(f"Stored {len(ACTIVE_VERSIONS)} predictions")
 
-            await db.commit()
+                # Open trades (in separate try-except so prediction storage is not affected)
+                for version in ACTIVE_VERSIONS:
+                    cfg = VERSION_CONFIGS[version]
+                    signal = map_signal(prediction_value, cfg)
+
+                    if signal["signal"] != "no_trade":
+                        try:
+                            trade_result = await trade_manager.open_trade(
+                                signal=signal,
+                                version=version,
+                                spot=spot,
+                                vix=vix,
+                                db=db,
+                                dhan_client=dhan_client,
+                                predicted_drawdown=prediction_value,
+                            )
+
+                            if trade_result:
+                                spread_price = trade_result.get("credit", 0) or trade_result.get("debit", 0)
+                                await price_tracker.record_initial_price(
+                                    trade_id=trade_result["trade_id"],
+                                    version=version,
+                                    signal_time=now_ist(),
+                                    spot=spot,
+                                    spread_price=spread_price,
+                                    db=db,
+                                )
+                                logger.info(f"[{version}] Opened trade: {trade_result['trade_id']}")
+                                trades_opened.append((version, signal, trade_result))
+                        except Exception as e:
+                            logger.error(f"[{version}] Failed to open trade: {e}")
+                            # Don't let trade opening failure prevent prediction storage
+
+                await db.commit()
+                logger.info("DB commit successful")
+
+            except Exception as e:
+                logger.error(f"DB transaction failed: {e}", exc_info=True)
+                await db.rollback()
+                raise
 
         # ===== Send email notifications (outside DB transaction) =====
         if trades_opened:
