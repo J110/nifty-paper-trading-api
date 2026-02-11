@@ -146,19 +146,30 @@ async def root():
 async def trigger_prediction():
     """
     Manually trigger the daily prediction pipeline.
-    Use this when the scheduler missed (e.g., Render free tier was asleep at 9:20 AM).
     Runs synchronously so errors are returned in the response.
     """
     from scheduler.jobs import generate_daily_predictions
+    from core.timezone import today_ist, now_ist
+    from sqlalchemy import select, func
     import traceback
 
     logger.info("Manual prediction trigger received")
+
+    # Count predictions before
+    before_count = 0
+    try:
+        async with async_session_factory() as db:
+            result = await db.execute(
+                select(func.count()).select_from(Prediction).where(
+                    Prediction.date == today_ist()
+                )
+            )
+            before_count = result.scalar() or 0
+    except Exception:
+        pass
+
     try:
         await generate_daily_predictions()
-        return {
-            "status": "success",
-            "message": "Prediction pipeline completed successfully.",
-        }
     except Exception as e:
         logger.error(f"Manual trigger failed: {e}", exc_info=True)
         return {
@@ -166,6 +177,28 @@ async def trigger_prediction():
             "error": str(e),
             "traceback": traceback.format_exc(),
         }
+
+    # Count predictions after
+    after_count = 0
+    try:
+        async with async_session_factory() as db:
+            result = await db.execute(
+                select(func.count()).select_from(Prediction).where(
+                    Prediction.date == today_ist()
+                )
+            )
+            after_count = result.scalar() or 0
+    except Exception:
+        pass
+
+    return {
+        "status": "success" if after_count > before_count else "warning",
+        "message": f"Pipeline completed. Predictions for {today_ist()}: {before_count} -> {after_count}",
+        "today_date": str(today_ist()),
+        "server_time": str(now_ist()),
+        "predictions_before": before_count,
+        "predictions_after": after_count,
+    }
 
 
 @app.post("/api/backfill")

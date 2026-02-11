@@ -353,6 +353,7 @@ async def generate_daily_predictions():
 
     except Exception as e:
         logger.error(f"Daily prediction pipeline failed: {e}", exc_info=True)
+        raise  # Re-raise so callers (manual trigger) can see the error
 
 
 async def check_all_exits():
