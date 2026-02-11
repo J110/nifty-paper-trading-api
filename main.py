@@ -147,17 +147,25 @@ async def trigger_prediction():
     """
     Manually trigger the daily prediction pipeline.
     Use this when the scheduler missed (e.g., Render free tier was asleep at 9:20 AM).
+    Runs synchronously so errors are returned in the response.
     """
     from scheduler.jobs import generate_daily_predictions
-    import asyncio
+    import traceback
 
     logger.info("Manual prediction trigger received")
-    # Run in background so the API responds immediately
-    asyncio.create_task(generate_daily_predictions())
-    return {
-        "status": "triggered",
-        "message": "Prediction pipeline started. Check /api/signals/current in ~30 seconds.",
-    }
+    try:
+        await generate_daily_predictions()
+        return {
+            "status": "success",
+            "message": "Prediction pipeline completed successfully.",
+        }
+    except Exception as e:
+        logger.error(f"Manual trigger failed: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        }
 
 
 @app.post("/api/backfill")
