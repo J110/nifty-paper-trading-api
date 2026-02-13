@@ -162,37 +162,38 @@ class DhanClient:
         Returns the renewal response dict on success.
         Raises DhanAPIError on failure (e.g. token already expired).
         """
-        if self._client is None or self._client.is_closed:
-            await self.start()
-
         await self._throttle()
 
-        # RenewToken uses 'dhanClientId' header (not 'client-id' used by other endpoints)
-        renew_headers = {
+        # Use a clean httpx request (not the session client which has extra headers)
+        # Dhan docs show only access-token and dhanClientId for this endpoint
+        url = f"{self._base}/RenewToken"
+        headers = {
             "access-token": self._headers["access-token"],
             "dhanClientId": DHAN_CLIENT_ID,
+            "client-id": DHAN_CLIENT_ID,
             "Content-Type": "application/json",
         }
 
-        # Try POST first, fall back to GET if POST fails
+        logger.info("Attempting token renewal at %s", url)
+
         try:
-            resp = await self._client.post(
-                "/RenewToken", content="", headers=renew_headers,
-            )
-            # If POST returns 405 Method Not Allowed, try GET
-            if resp.status_code == 405:
-                logger.info("RenewToken POST returned 405, trying GET")
-                resp = await self._client.get("/RenewToken", headers=renew_headers)
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+                # Try POST first
+                resp = await client.post(url, headers=headers, content="")
+                logger.info("RenewToken POST response: %s %s", resp.status_code, resp.text[:200])
+
+                # If POST returns 405, try GET
+                if resp.status_code == 405:
+                    logger.info("RenewToken POST returned 405, trying GET")
+                    resp = await client.get(url, headers=headers)
+                    logger.info("RenewToken GET response: %s %s", resp.status_code, resp.text[:200])
         except httpx.RequestError as exc:
             logger.error("Network error on RenewToken: %s", exc)
             raise DhanAPIError(f"Network error during token renewal: {exc}") from exc
 
         if resp.status_code >= 400:
             body = resp.text[:500]
-            logger.error(
-                "Token renewal failed (HTTP %s): %s",
-                resp.status_code, body,
-            )
+            logger.error("Token renewal failed (HTTP %s): %s", resp.status_code, body)
             raise DhanAPIError(
                 f"Token renewal failed (HTTP {resp.status_code}): {body}",
                 status_code=resp.status_code,
