@@ -70,7 +70,7 @@ async def run_backfill():
     # Clear only backtest-period data, preserve live/forward-test trades
     logger.info(f"Clearing backtest data (before {FORWARD_TEST_START}), preserving live trades...")
     await conn.execute(f"DELETE FROM delay_prices WHERE signal_date < '{FORWARD_TEST_START}'")
-    await conn.execute(f"DELETE FROM price_snapshots WHERE trade_id IN (SELECT trade_id FROM trades WHERE entry_date < '{FORWARD_TEST_START}')")
+    await conn.execute(f"DELETE FROM price_snapshots WHERE timestamp < '{FORWARD_TEST_START}'")
     await conn.execute(f"DELETE FROM daily_pnl WHERE date < '{FORWARD_TEST_START}'")
     await conn.execute(f"DELETE FROM trades WHERE entry_date < '{FORWARD_TEST_START}'")
     await conn.execute(f"DELETE FROM predictions WHERE date < '{FORWARD_TEST_START}'")
