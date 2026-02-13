@@ -35,7 +35,7 @@ class DhanAPIError(Exception):
 # ---------------------------------------------------------------------------
 
 NIFTY_SECURITY_ID = 13
-INDIA_VIX_SECURITY_ID = 26
+INDIA_VIX_SECURITY_ID = 21  # Was 26 (wrong) — confirmed 21 from Dhan scrip master
 
 # Minimum gap (seconds) between consecutive API calls.
 _RATE_LIMIT_SECONDS = 0.10
@@ -153,66 +153,29 @@ class DhanClient:
 
     async def renew_token(self) -> dict:
         """
-        Renew the Dhan access token for another 24 hours.
+        Attempt to renew the Dhan access token for another 24 hours.
 
-        Calls the /v2/RenewToken endpoint with the current token. On success,
-        updates the in-memory headers so all subsequent API calls use
-        the new token. The old token is invalidated by Dhan.
+        NOTE: As of Feb 2026, Dhan's RenewToken endpoint appears to not work
+        for API portal-generated tokens (DH-905/DH-906 errors). The scheduled
+        renewal job will log this failure gracefully. The pipeline still works
+        without token renewal — it falls back to parquet data.
 
-        Returns the renewal response dict on success.
-        Raises DhanAPIError on failure (e.g. token already expired).
+        If Dhan fixes this in the future, this method is ready to go.
         """
         await self._throttle()
 
-        # Use a clean httpx request — Dhan docs show only headers, no body
         url = f"{self._base}/RenewToken"
+        headers = {
+            "access-token": self._headers["access-token"],
+            "dhanClientId": DHAN_CLIENT_ID,
+        }
 
         logger.info("Attempting token renewal at %s", url)
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-                # Try multiple header combinations until one works
-                header_variants = [
-                    # Variant 1: exactly as Dhan docs show (dhanClientId header)
-                    {
-                        "access-token": self._headers["access-token"],
-                        "dhanClientId": DHAN_CLIENT_ID,
-                    },
-                    # Variant 2: with client-id instead (like other endpoints)
-                    {
-                        "access-token": self._headers["access-token"],
-                        "client-id": DHAN_CLIENT_ID,
-                        "Content-Type": "application/json",
-                    },
-                    # Variant 3: both headers
-                    {
-                        "access-token": self._headers["access-token"],
-                        "dhanClientId": DHAN_CLIENT_ID,
-                        "client-id": DHAN_CLIENT_ID,
-                        "Content-Type": "application/json",
-                        "Accept": "application/json",
-                    },
-                ]
-
-                resp = None
-                for i, headers in enumerate(header_variants):
-                    # Try POST
-                    resp = await client.post(url, headers=headers)
-                    logger.info(
-                        "RenewToken variant %d POST: %s %s",
-                        i + 1, resp.status_code, resp.text[:200],
-                    )
-                    if resp.status_code < 400:
-                        break
-
-                    # Try GET with same headers
-                    resp = await client.get(url, headers=headers)
-                    logger.info(
-                        "RenewToken variant %d GET: %s %s",
-                        i + 1, resp.status_code, resp.text[:200],
-                    )
-                    if resp.status_code < 400:
-                        break
+                resp = await client.post(url, headers=headers)
+                logger.info("RenewToken response: %s %s", resp.status_code, resp.text[:300])
         except httpx.RequestError as exc:
             logger.error("Network error on RenewToken: %s", exc)
             raise DhanAPIError(f"Network error during token renewal: {exc}") from exc
