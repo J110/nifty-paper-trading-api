@@ -201,6 +201,75 @@ async def trigger_prediction():
     return result
 
 
+@app.post("/api/debug/run-pipeline")
+async def debug_run_pipeline():
+    """Run the exact pipeline code inline with full error capture at every step."""
+    import traceback
+    from core.timezone import today_ist, now_ist
+    from core.feature_engine import build_live_features
+    from core.model_runner import ModelRunner
+    from core.signal_mapper import map_signal
+    from core.dhan_client import DhanClient
+    from config import DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH, ACTIVE_VERSIONS, VERSION_CONFIGS
+    from sqlalchemy import delete
+    import pandas as pd
+
+    steps = {}
+    try:
+        dc = DhanClient()
+        spot = await dc.get_nifty_ltp()
+        vix_live = await dc.get_india_vix()
+        steps["1_dhan"] = {"spot": spot, "vix": vix_live}
+
+        features = await build_live_features(dc, pd.DataFrame(), None)
+        steps["2_features"] = {"count": len(features)}
+
+        if spot is None:
+            spot = features.get("nifty_close", 0)
+        if vix_live is None:
+            vix_live = features.get("india_vix", 0)
+        steps["3_fallback"] = {"spot": float(spot), "vix": float(vix_live)}
+
+        mr = ModelRunner(DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH)
+        prediction_value = mr.predict(features)
+        steps["4_prediction"] = float(prediction_value)
+
+        async with async_session_factory() as db:
+            try:
+                await db.execute(delete(DailyFeature).where(DailyFeature.date == today_ist()))
+                df = DailyFeature(date=today_ist(), features=features, vix=features.get("vix"), rsi_14=features.get("rsi_14"))
+                db.add(df)
+                await db.flush()
+                steps["5a_features_flush"] = "OK"
+
+                await db.execute(delete(Prediction).where(Prediction.date == today_ist()))
+                for version in ACTIVE_VERSIONS:
+                    cfg = VERSION_CONFIGS[version]
+                    signal = map_signal(prediction_value, cfg)
+                    pred = Prediction(date=today_ist(), timestamp=now_ist(), predicted_drawdown=prediction_value,
+                        signal_type=signal["signal"], version=version, nifty_spot=spot, vix=vix_live,
+                        confidence_score=0.25, graduated_mult=signal["size_mult"], features=features)
+                    db.add(pred)
+
+                await db.flush()
+                steps["5b_predictions_flush"] = "OK"
+
+                await db.commit()
+                steps["5c_commit"] = "OK"
+
+            except Exception as e:
+                await db.rollback()
+                steps["5_db_error"] = str(e)
+
+        steps["status"] = "success"
+    except Exception as e:
+        steps["fatal_error"] = f"{e}"
+        steps["status"] = "failed"
+
+    steps["today"] = str(today_ist())
+    return steps
+
+
 @app.get("/api/debug/pipeline-test")
 async def debug_pipeline_test():
     """Test each step of the prediction pipeline independently."""
