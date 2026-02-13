@@ -149,6 +149,8 @@ async def trigger_prediction():
     Runs synchronously so errors are returned in the response.
     """
     from scheduler.jobs import generate_daily_predictions
+    from db.database import async_session_factory
+    from db.models import Prediction
     from core.timezone import today_ist, now_ist
     from sqlalchemy import select, func
     import traceback
