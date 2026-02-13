@@ -213,11 +213,8 @@ class DhanClient:
     async def get_nifty_ltp(self) -> float | None:
         """Return the last-traded price for Nifty 50 index, or None on error."""
         try:
-            data = await self._post(
-                "/marketfeed/ltp",
-                {"IDX_I": [NIFTY_SECURITY_ID]},
-            )
-            return self._extract_ltp(data)
+            prices = await self._get_index_prices()
+            return prices.get("nifty")
         except DhanAPIError:
             logger.exception("Failed to fetch Nifty LTP")
             return None
@@ -225,14 +222,55 @@ class DhanClient:
     async def get_india_vix(self) -> float | None:
         """Return the last-traded price for India VIX, or None on error."""
         try:
-            data = await self._post(
-                "/marketfeed/ltp",
-                {"IDX_I": [INDIA_VIX_SECURITY_ID]},
-            )
-            return self._extract_ltp(data)
+            prices = await self._get_index_prices()
+            return prices.get("vix")
         except DhanAPIError:
             logger.exception("Failed to fetch India VIX")
             return None
+
+    async def _get_index_prices(self) -> dict:
+        """
+        Fetch Nifty 50 and India VIX in a SINGLE API call.
+
+        Returns dict with keys 'nifty' and 'vix' (float values).
+        Caches for 5 seconds to avoid duplicate calls when get_nifty_ltp()
+        and get_india_vix() are called back-to-back.
+        """
+        now = time.monotonic()
+
+        # Return cached result if fresh (< 5 seconds old)
+        if (hasattr(self, "_index_cache") and
+                self._index_cache and
+                now - self._index_cache_ts < 5.0):
+            return self._index_cache
+
+        data = await self._post(
+            "/marketfeed/ltp",
+            {"IDX_I": [NIFTY_SECURITY_ID, INDIA_VIX_SECURITY_ID]},
+        )
+
+        # Response shape: {"data": {"IDX_I": {"13": {"last_price": 25535}, "21": {"last_price": 12.4}}}}
+        prices = {}
+        try:
+            idx_data = data.get("data", {}).get("IDX_I", {})
+            nifty_data = idx_data.get(str(NIFTY_SECURITY_ID), {})
+            vix_data = idx_data.get(str(INDIA_VIX_SECURITY_ID), {})
+
+            if "last_price" in nifty_data:
+                prices["nifty"] = float(nifty_data["last_price"])
+            if "last_price" in vix_data:
+                prices["vix"] = float(vix_data["last_price"])
+        except (TypeError, ValueError, KeyError) as e:
+            logger.warning(f"Failed to parse index prices from {data}: {e}")
+
+        if prices:
+            logger.info(f"Index prices: Nifty={prices.get('nifty')}, VIX={prices.get('vix')}")
+        else:
+            logger.warning(f"Empty index prices from response: {data}")
+
+        self._index_cache = prices
+        self._index_cache_ts = now
+        return prices
 
     async def get_option_chain(self, expiry_date: str) -> dict | None:
         """
