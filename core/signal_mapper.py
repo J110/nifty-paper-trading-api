@@ -299,7 +299,7 @@ def get_classification_breakdown(pred: float, version: str = None) -> dict:
         zones.append({
             "name": "No Trade (Bear)",
             "range": f"{T3_PCT}% to -10.0%",
-            "color": "#EF5350",
+            "color": "#7B1A1A",
             "active": pred_pct <= T3_PCT,
             "min": -10.0,
             "max": T3_PCT,
