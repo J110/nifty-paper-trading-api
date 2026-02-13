@@ -164,29 +164,55 @@ class DhanClient:
         """
         await self._throttle()
 
-        # Use a clean httpx request (not the session client which has extra headers)
-        # Dhan docs show only access-token and dhanClientId for this endpoint
+        # Use a clean httpx request — Dhan docs show only headers, no body
         url = f"{self._base}/RenewToken"
-        headers = {
-            "access-token": self._headers["access-token"],
-            "dhanClientId": DHAN_CLIENT_ID,
-            "client-id": DHAN_CLIENT_ID,
-            "Content-Type": "application/json",
-        }
 
         logger.info("Attempting token renewal at %s", url)
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-                # Try POST first
-                resp = await client.post(url, headers=headers, content="")
-                logger.info("RenewToken POST response: %s %s", resp.status_code, resp.text[:200])
+                # Try multiple header combinations until one works
+                header_variants = [
+                    # Variant 1: exactly as Dhan docs show (dhanClientId header)
+                    {
+                        "access-token": self._headers["access-token"],
+                        "dhanClientId": DHAN_CLIENT_ID,
+                    },
+                    # Variant 2: with client-id instead (like other endpoints)
+                    {
+                        "access-token": self._headers["access-token"],
+                        "client-id": DHAN_CLIENT_ID,
+                        "Content-Type": "application/json",
+                    },
+                    # Variant 3: both headers
+                    {
+                        "access-token": self._headers["access-token"],
+                        "dhanClientId": DHAN_CLIENT_ID,
+                        "client-id": DHAN_CLIENT_ID,
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                ]
 
-                # If POST returns 405, try GET
-                if resp.status_code == 405:
-                    logger.info("RenewToken POST returned 405, trying GET")
+                resp = None
+                for i, headers in enumerate(header_variants):
+                    # Try POST
+                    resp = await client.post(url, headers=headers)
+                    logger.info(
+                        "RenewToken variant %d POST: %s %s",
+                        i + 1, resp.status_code, resp.text[:200],
+                    )
+                    if resp.status_code < 400:
+                        break
+
+                    # Try GET with same headers
                     resp = await client.get(url, headers=headers)
-                    logger.info("RenewToken GET response: %s %s", resp.status_code, resp.text[:200])
+                    logger.info(
+                        "RenewToken variant %d GET: %s %s",
+                        i + 1, resp.status_code, resp.text[:200],
+                    )
+                    if resp.status_code < 400:
+                        break
         except httpx.RequestError as exc:
             logger.error("Network error on RenewToken: %s", exc)
             raise DhanAPIError(f"Network error during token renewal: {exc}") from exc
