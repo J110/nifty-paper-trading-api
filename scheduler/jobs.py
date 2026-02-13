@@ -21,6 +21,7 @@ from core.feature_engine import build_live_features
 from core.trade_manager import TradeManager
 from core.price_tracker import PriceTracker
 from core.email_notifier import send_trade_alert, send_no_trade_alert, send_exit_alert
+from core.data_updater import update_merged_daily
 from config import (
     ACTIVE_VERSIONS, VERSION_CONFIGS, INITIAL_CAPITAL,
     DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH,
@@ -38,6 +39,19 @@ price_tracker = PriceTracker()
 def setup_scheduler() -> AsyncIOScheduler:
     """Configure and return the APScheduler instance."""
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
+
+    # 0. Update merged_daily.parquet at 9:05 AM IST (before predictions at 9:20)
+    #    Downloads latest data from yfinance so features use yesterday's close.
+    scheduler.add_job(
+        run_data_update,
+        CronTrigger(
+            day_of_week="mon-fri",
+            hour=9, minute=5,
+            timezone="Asia/Kolkata",
+        ),
+        id="data_update",
+        replace_existing=True,
+    )
 
     # 1. Fetch live prices every 15 minutes during market hours (reduced from 5min to avoid Dhan 429)
     scheduler.add_job(
@@ -90,8 +104,37 @@ def setup_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    logger.info("Scheduler configured with all jobs")
+    logger.info("Scheduler configured with all jobs (data_update→predictions→exits→eod)")
     return scheduler
+
+
+async def run_data_update():
+    """
+    Scheduled job: update merged_daily.parquet with latest yfinance data.
+
+    Runs at 9:05 AM IST, 15 minutes before the prediction pipeline.
+    This ensures yesterday's close prices are available for feature computation.
+    Failures are logged but don't block the prediction pipeline (it will use
+    whatever data is in the parquet).
+    """
+    logger.info("=== Starting daily data update ===")
+    try:
+        result = await update_merged_daily()
+        if result["status"] == "updated":
+            logger.info(
+                f"Data update SUCCESS: added {result['rows_added']} rows, "
+                f"last date now {result['last_date_after']}"
+            )
+        elif result["status"] == "already_current":
+            logger.info(f"Data already current (last: {result['last_date_after']})")
+        elif result["status"] == "no_new_data":
+            logger.info("No new data available (market may be closed)")
+        else:
+            logger.warning(f"Data update result: {result}")
+    except Exception as e:
+        logger.error(f"Data update failed: {e}", exc_info=True)
+        # Don't raise — let the prediction pipeline run with existing data
+    logger.info("=== Daily data update complete ===")
 
 
 async def check_and_recover_missed_prediction():
@@ -99,6 +142,8 @@ async def check_and_recover_missed_prediction():
     Startup recovery: check if today's daily prediction was missed.
     If the server restarted after 9:20 AM IST on a weekday and no
     prediction exists for today, auto-run the prediction pipeline.
+
+    Also runs data update first to ensure parquet is fresh.
     """
     try:
         current_time = now_ist()
@@ -115,6 +160,15 @@ async def check_and_recover_missed_prediction():
         if current_time.time() > dtime(15, 30):
             logger.info("Startup recovery: after market close — too late to recover")
             return
+
+        # Update parquet data before running prediction recovery
+        logger.info("Startup recovery: updating parquet data first...")
+        try:
+            update_result = await update_merged_daily()
+            logger.info(f"Startup data update: {update_result.get('status')}, "
+                        f"last date: {update_result.get('last_date_after')}")
+        except Exception as e:
+            logger.warning(f"Startup data update failed (will use existing): {e}")
 
         # Check if today's prediction exists in DB
         today = current_time.date()

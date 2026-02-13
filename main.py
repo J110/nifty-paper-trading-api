@@ -138,6 +138,7 @@ async def root():
             "chart_equity": "/api/chart-data/equity/{version}",
             "indicators": "/api/indicators",
             "trigger": "/api/trigger-prediction (POST)",
+            "update_data": "/api/update-data (POST)",
         },
     }
 
@@ -336,6 +337,32 @@ async def debug_pipeline_test():
     results["now_ist"] = str(now_ist())
 
     return results
+
+
+@app.post("/api/update-data")
+async def update_data_endpoint():
+    """
+    Manually trigger data update (yfinance → merged_daily.parquet).
+    Useful for ensuring latest market data is available before predictions.
+    Runs automatically at 9:05 AM IST, but can be triggered manually.
+    """
+    from core.data_updater import update_merged_daily
+    from core.timezone import now_ist
+    import traceback
+
+    logger.info("Manual data update triggered")
+    try:
+        result = await update_merged_daily()
+        result["server_time"] = str(now_ist())
+        return result
+    except Exception as e:
+        logger.error(f"Manual data update failed: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "server_time": str(now_ist()),
+        }
 
 
 @app.post("/api/backfill")
