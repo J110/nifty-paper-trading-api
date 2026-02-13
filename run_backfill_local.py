@@ -66,8 +66,10 @@ async def run_backfill():
     conn = await asyncpg.connect(DB_URL, ssl=ssl_ctx)
     logger.info("Connected!")
 
-    # Clear existing data
+    # Clear existing data (respect foreign key order)
     logger.info("Clearing existing data...")
+    await conn.execute("DELETE FROM delay_prices")
+    await conn.execute("DELETE FROM price_snapshots")
     await conn.execute("DELETE FROM daily_pnl")
     await conn.execute("DELETE FROM trades")
     await conn.execute("DELETE FROM predictions")
