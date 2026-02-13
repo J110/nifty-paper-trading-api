@@ -95,48 +95,59 @@ class DhanClient:
 
     # -- low-level request ---------------------------------------------------
 
-    async def _post(self, path: str, payload: dict) -> dict:
+    async def _post(self, path: str, payload: dict, retries: int = 2) -> dict:
         """
         POST *path* with *payload* and return the parsed JSON response.
 
+        Retries on 429 (rate limit) with exponential backoff.
         Raises DhanAPIError on HTTP or network errors.
         """
         if self._client is None or self._client.is_closed:
             await self.start()
 
-        await self._throttle()
+        for attempt in range(retries + 1):
+            await self._throttle()
 
-        try:
-            resp = await self._client.post(path, json=payload)
-        except httpx.RequestError as exc:
-            logger.error("Network error on POST %s: %s", path, exc)
-            raise DhanAPIError(f"Network error: {exc}") from exc
+            try:
+                resp = await self._client.post(path, json=payload)
+            except httpx.RequestError as exc:
+                logger.error("Network error on POST %s: %s", path, exc)
+                raise DhanAPIError(f"Network error: {exc}") from exc
 
-        if resp.status_code == 401:
-            logger.error("Authentication failed (401) — token may be expired")
-            raise DhanAPIError(
-                "Authentication failed — check DHAN_ACCESS_TOKEN",
-                status_code=401,
-                body=resp.text,
-            )
+            if resp.status_code == 401:
+                logger.error("Authentication failed (401) — token may be expired")
+                raise DhanAPIError(
+                    "Authentication failed — check DHAN_ACCESS_TOKEN",
+                    status_code=401,
+                    body=resp.text,
+                )
 
-        if resp.status_code >= 400:
-            logger.error(
-                "Dhan API error %s on POST %s: %s",
-                resp.status_code,
-                path,
-                resp.text[:500],
-            )
-            raise DhanAPIError(
-                f"HTTP {resp.status_code} on {path}",
-                status_code=resp.status_code,
-                body=resp.text,
-            )
+            if resp.status_code == 429 and attempt < retries:
+                wait = 2 ** (attempt + 1)  # 2s, 4s
+                logger.warning(f"Rate limited (429) on {path}, retrying in {wait}s (attempt {attempt + 1}/{retries})")
+                await asyncio.sleep(wait)
+                continue
 
-        try:
-            return resp.json()
-        except ValueError as exc:
-            raise DhanAPIError("Invalid JSON in response") from exc
+            if resp.status_code >= 400:
+                logger.error(
+                    "Dhan API error %s on POST %s: %s",
+                    resp.status_code,
+                    path,
+                    resp.text[:500],
+                )
+                raise DhanAPIError(
+                    f"HTTP {resp.status_code} on {path}",
+                    status_code=resp.status_code,
+                    body=resp.text,
+                )
+
+            try:
+                return resp.json()
+            except ValueError as exc:
+                raise DhanAPIError("Invalid JSON in response") from exc
+
+        # Should not reach here, but just in case
+        raise DhanAPIError(f"All {retries + 1} attempts failed for {path}")
 
     # -- public endpoints ----------------------------------------------------
 

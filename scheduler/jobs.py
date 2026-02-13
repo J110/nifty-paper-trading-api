@@ -39,13 +39,13 @@ def setup_scheduler() -> AsyncIOScheduler:
     """Configure and return the APScheduler instance."""
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
 
-    # 1. Fetch live prices every 5 minutes during market hours
+    # 1. Fetch live prices every 15 minutes during market hours (reduced from 5min to avoid Dhan 429)
     scheduler.add_job(
         record_price_snapshot,
         CronTrigger(
             day_of_week="mon-fri",
             hour="9-15",
-            minute="*/5",
+            minute="*/15",
             timezone="Asia/Kolkata",
         ),
         id="price_snapshot",
