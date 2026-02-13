@@ -34,8 +34,8 @@ class DhanAPIError(Exception):
 # Security constants
 # ---------------------------------------------------------------------------
 
-NIFTY_SECURITY_ID = "13"
-INDIA_VIX_SECURITY_ID = "26"
+NIFTY_SECURITY_ID = 13
+INDIA_VIX_SECURITY_ID = 26
 
 # Minimum gap (seconds) between consecutive API calls.
 _RATE_LIMIT_SECONDS = 0.10
@@ -318,7 +318,7 @@ class DhanClient:
         try:
             data = await self._post(
                 "/marketfeed/ltp",
-                {"NSE_FNO": [security_id]},
+                {"NSE_FNO": [int(security_id)]},
             )
             return self._extract_ltp(data)
         except DhanAPIError:
