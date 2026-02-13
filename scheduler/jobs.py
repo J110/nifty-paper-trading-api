@@ -40,8 +40,21 @@ def setup_scheduler() -> AsyncIOScheduler:
     """Configure and return the APScheduler instance."""
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
 
-    # 0. Update merged_daily.parquet at 9:05 AM IST (before predictions at 9:20)
-    #    Downloads latest data from yfinance so features use yesterday's close.
+    # 0a. Renew Dhan token at 8:30 AM IST (before any API calls)
+    #     Token expires every 24h — this extends it for another 24h.
+    scheduler.add_job(
+        renew_dhan_token,
+        CronTrigger(
+            day_of_week="mon-fri",
+            hour=8, minute=30,
+            timezone="Asia/Kolkata",
+        ),
+        id="token_renewal",
+        replace_existing=True,
+    )
+
+    # 0b. Update merged_daily.parquet at 9:05 AM IST (before predictions at 9:20)
+    #     Downloads latest data from yfinance so features use yesterday's close.
     scheduler.add_job(
         run_data_update,
         CronTrigger(
@@ -104,8 +117,31 @@ def setup_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    logger.info("Scheduler configured with all jobs (data_update→predictions→exits→eod)")
+    logger.info("Scheduler configured with all jobs (token→data→predictions→exits→eod)")
     return scheduler
+
+
+async def renew_dhan_token():
+    """
+    Scheduled job: renew Dhan API token for another 24 hours.
+
+    Runs at 8:30 AM IST daily (before any market data calls).
+    The token must still be active (not expired) for renewal to work.
+    If renewal fails (e.g. token already expired), the pipeline will
+    still work using parquet data — just without live spot/VIX/option chain.
+    """
+    logger.info("=== Starting Dhan token renewal ===")
+    try:
+        result = await dhan_client.renew_token()
+        expiry = result.get("expiryTime", "unknown")
+        logger.info(f"Token renewal SUCCESS — new token expires: {expiry}")
+    except Exception as e:
+        logger.error(f"Token renewal FAILED: {e}")
+        logger.error(
+            "Dhan API will not work until token is manually updated. "
+            "Pipeline will fall back to parquet data."
+        )
+    logger.info("=== Dhan token renewal complete ===")
 
 
 async def run_data_update():
@@ -160,6 +196,14 @@ async def check_and_recover_missed_prediction():
         if current_time.time() > dtime(15, 30):
             logger.info("Startup recovery: after market close — too late to recover")
             return
+
+        # Renew Dhan token before any API calls
+        logger.info("Startup recovery: renewing Dhan token...")
+        try:
+            await dhan_client.renew_token()
+            logger.info("Startup token renewal succeeded")
+        except Exception as e:
+            logger.warning(f"Startup token renewal failed (will use parquet fallback): {e}")
 
         # Update parquet data before running prediction recovery
         logger.info("Startup recovery: updating parquet data first...")

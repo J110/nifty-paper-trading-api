@@ -149,6 +149,60 @@ class DhanClient:
         # Should not reach here, but just in case
         raise DhanAPIError(f"All {retries + 1} attempts failed for {path}")
 
+    # -- token renewal -------------------------------------------------------
+
+    async def renew_token(self) -> dict:
+        """
+        Renew the Dhan access token for another 24 hours.
+
+        Calls POST /v2/RenewToken with the current token. On success,
+        updates the in-memory headers so all subsequent API calls use
+        the new token. The old token is invalidated by Dhan.
+
+        Returns the renewal response dict on success.
+        Raises DhanAPIError on failure (e.g. token already expired).
+        """
+        if self._client is None or self._client.is_closed:
+            await self.start()
+
+        await self._throttle()
+
+        try:
+            resp = await self._client.post("/RenewToken", json={})
+        except httpx.RequestError as exc:
+            logger.error("Network error on RenewToken: %s", exc)
+            raise DhanAPIError(f"Network error during token renewal: {exc}") from exc
+
+        if resp.status_code >= 400:
+            logger.error(
+                "Token renewal failed (HTTP %s): %s",
+                resp.status_code, resp.text[:500],
+            )
+            raise DhanAPIError(
+                f"Token renewal failed (HTTP {resp.status_code})",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise DhanAPIError("Invalid JSON in RenewToken response") from exc
+
+        new_token = data.get("accessToken")
+        if not new_token:
+            raise DhanAPIError(f"No accessToken in renewal response: {data}")
+
+        # Update in-memory headers for this client and the httpx session
+        self._headers["access-token"] = new_token
+        if self._client and not self._client.is_closed:
+            self._client.headers["access-token"] = new_token
+
+        expiry = data.get("expiryTime", "unknown")
+        logger.info("Dhan token renewed successfully — expires %s", expiry)
+
+        return data
+
     # -- public endpoints ----------------------------------------------------
 
     async def get_nifty_ltp(self) -> float | None:

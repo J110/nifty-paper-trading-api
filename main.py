@@ -138,6 +138,7 @@ async def root():
             "chart_equity": "/api/chart-data/equity/{version}",
             "indicators": "/api/indicators",
             "trigger": "/api/trigger-prediction (POST)",
+            "renew_token": "/api/renew-token (POST)",
             "update_data": "/api/update-data (POST)",
         },
     }
@@ -337,6 +338,36 @@ async def debug_pipeline_test():
     results["now_ist"] = str(now_ist())
 
     return results
+
+
+@app.post("/api/renew-token")
+async def renew_token_endpoint():
+    """
+    Manually trigger Dhan token renewal.
+    Extends the current token for another 24 hours.
+    Token must still be active (not expired) for this to work.
+    """
+    from scheduler.jobs import dhan_client
+    from core.timezone import now_ist
+    import traceback
+
+    logger.info("Manual token renewal triggered")
+    try:
+        result = await dhan_client.renew_token()
+        return {
+            "status": "renewed",
+            "expiry": result.get("expiryTime"),
+            "client_id": result.get("dhanClientId"),
+            "server_time": str(now_ist()),
+        }
+    except Exception as e:
+        logger.error(f"Manual token renewal failed: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "server_time": str(now_ist()),
+        }
 
 
 @app.post("/api/update-data")
