@@ -155,7 +155,7 @@ class DhanClient:
         """
         Renew the Dhan access token for another 24 hours.
 
-        Calls POST /v2/RenewToken with the current token. On success,
+        Calls the /v2/RenewToken endpoint with the current token. On success,
         updates the in-memory headers so all subsequent API calls use
         the new token. The old token is invalidated by Dhan.
 
@@ -167,19 +167,34 @@ class DhanClient:
 
         await self._throttle()
 
+        # RenewToken uses 'dhanClientId' header (not 'client-id' used by other endpoints)
+        renew_headers = {
+            "access-token": self._headers["access-token"],
+            "dhanClientId": DHAN_CLIENT_ID,
+            "Content-Type": "application/json",
+        }
+
+        # Try POST first, fall back to GET if POST fails
         try:
-            resp = await self._client.post("/RenewToken", json={})
+            resp = await self._client.post(
+                "/RenewToken", content="", headers=renew_headers,
+            )
+            # If POST returns 405 Method Not Allowed, try GET
+            if resp.status_code == 405:
+                logger.info("RenewToken POST returned 405, trying GET")
+                resp = await self._client.get("/RenewToken", headers=renew_headers)
         except httpx.RequestError as exc:
             logger.error("Network error on RenewToken: %s", exc)
             raise DhanAPIError(f"Network error during token renewal: {exc}") from exc
 
         if resp.status_code >= 400:
+            body = resp.text[:500]
             logger.error(
                 "Token renewal failed (HTTP %s): %s",
-                resp.status_code, resp.text[:500],
+                resp.status_code, body,
             )
             raise DhanAPIError(
-                f"Token renewal failed (HTTP {resp.status_code})",
+                f"Token renewal failed (HTTP {resp.status_code}): {body}",
                 status_code=resp.status_code,
                 body=resp.text,
             )
