@@ -205,6 +205,8 @@ async def trigger_prediction():
 async def debug_run_pipeline():
     """Run the exact pipeline code inline with full error capture at every step."""
     import traceback
+    from db.database import async_session_factory
+    from db.models import Prediction, DailyFeature
     from core.timezone import today_ist, now_ist
     from core.feature_engine import build_live_features
     from core.model_runner import ModelRunner
