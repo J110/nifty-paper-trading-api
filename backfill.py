@@ -134,14 +134,15 @@ async def run_backfill(db_session) -> dict:
     logger.info("=== Starting historical backfill (server-side, simplified engine) ===")
     logger.warning("NOTE: For exact backtest-identical results, use run_backfill_local.py")
 
-    # Clear existing backfill data
-    logger.info("Clearing existing backfill data...")
-    await db_session.execute(text("DELETE FROM daily_pnl"))
-    await db_session.execute(text("DELETE FROM trades"))
-    await db_session.execute(text("DELETE FROM predictions"))
-    await db_session.execute(text("DELETE FROM daily_features"))
+    # Clear only backtest-period data, preserve live/forward-test trades
+    FORWARD_TEST_START = "2026-02-13"
+    logger.info(f"Clearing backtest data (before {FORWARD_TEST_START}), preserving live trades...")
+    await db_session.execute(text(f"DELETE FROM daily_pnl WHERE date < '{FORWARD_TEST_START}'"))
+    await db_session.execute(text(f"DELETE FROM trades WHERE entry_date < '{FORWARD_TEST_START}'"))
+    await db_session.execute(text(f"DELETE FROM predictions WHERE date < '{FORWARD_TEST_START}'"))
+    await db_session.execute(text(f"DELETE FROM daily_features WHERE date < '{FORWARD_TEST_START}'"))
     await db_session.commit()
-    logger.info("Existing data cleared")
+    logger.info("Backtest data cleared (live trades preserved)")
 
     # Load ground truth data
     if not os.path.exists(MERGED_DAILY_PATH):

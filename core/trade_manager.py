@@ -203,6 +203,14 @@ class TradeManager:
             bear_trail_high=0.0,
         )
 
+        # Guard against duplicate trades (e.g. pipeline re-run on same day)
+        existing = await db.execute(
+            select(Trade).where(Trade.trade_id == trade_id)
+        )
+        if existing.scalar_one_or_none() is not None:
+            logger.warning(f"[{version}] Trade {trade_id} already exists — skipping duplicate")
+            return trade_id
+
         db.add(trade)
         await db.commit()
 

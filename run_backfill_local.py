@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 # ── Config ───────────────────────────────────────────────────────────
 DB_URL = "postgresql://neondb_owner:npg_g8DMmJ3XByNF@ep-flat-tree-a1bahirx-pooler.ap-southeast-1.aws.neon.tech/neondb"
 BACKFILL_START = "2024-01-01"
+FORWARD_TEST_START = "2026-02-13"  # Protect live trades from backfill wipe
 
 # Version mapping: display version → config profile name
 VERSION_MAP = {
@@ -66,15 +67,17 @@ async def run_backfill():
     conn = await asyncpg.connect(DB_URL, ssl=ssl_ctx)
     logger.info("Connected!")
 
-    # Clear existing data (respect foreign key order)
-    logger.info("Clearing existing data...")
-    await conn.execute("DELETE FROM delay_prices")
-    await conn.execute("DELETE FROM price_snapshots")
-    await conn.execute("DELETE FROM daily_pnl")
-    await conn.execute("DELETE FROM trades")
-    await conn.execute("DELETE FROM predictions")
-    await conn.execute("DELETE FROM daily_features")
-    logger.info("Data cleared")
+    # Clear only backtest-period data, preserve live/forward-test trades
+    logger.info(f"Clearing backtest data (before {FORWARD_TEST_START}), preserving live trades...")
+    await conn.execute(f"DELETE FROM delay_prices WHERE signal_date < '{FORWARD_TEST_START}'")
+    await conn.execute(f"DELETE FROM price_snapshots WHERE trade_id IN (SELECT trade_id FROM trades WHERE entry_date < '{FORWARD_TEST_START}')")
+    await conn.execute(f"DELETE FROM daily_pnl WHERE date < '{FORWARD_TEST_START}'")
+    await conn.execute(f"DELETE FROM trades WHERE entry_date < '{FORWARD_TEST_START}'")
+    await conn.execute(f"DELETE FROM predictions WHERE date < '{FORWARD_TEST_START}'")
+    await conn.execute(f"DELETE FROM daily_features WHERE date < '{FORWARD_TEST_START}'")
+    live_trades = await conn.fetchval(f"SELECT count(*) FROM trades WHERE entry_date >= '{FORWARD_TEST_START}'")
+    live_preds = await conn.fetchval(f"SELECT count(*) FROM predictions WHERE date >= '{FORWARD_TEST_START}'")
+    logger.info(f"Backtest data cleared. Preserved {live_trades} live trades, {live_preds} live predictions")
 
     # Load feature matrix (already built by main.py pipeline)
     feature_matrix_path = os.path.join(backtest_config.DATA_FEATURES, "feature_matrix.parquet")

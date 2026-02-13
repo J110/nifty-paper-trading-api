@@ -300,7 +300,7 @@ async def get_drawdown_comparison(
     }
 
 
-FORWARD_TEST_START = date(2026, 2, 11)
+FORWARD_TEST_START = date(2026, 2, 13)
 
 
 @router.get("/chart-data/equity/{version}")

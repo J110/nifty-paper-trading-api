@@ -89,7 +89,7 @@ async def get_delay_analysis(
     }
 
 
-FORWARD_TEST_START = date(2026, 2, 11)
+FORWARD_TEST_START = date(2026, 2, 13)
 
 
 @router.get("/trades/{version}/returns")
@@ -105,8 +105,8 @@ async def get_returns(
     Returns periodic returns.
 
     data_mode:
-      - backtest: trades with entry_date < 2025-02-11
-      - forwardtest: trades with entry_date >= 2025-02-11
+      - backtest: trades with entry_date < 2026-02-13
+      - forwardtest: trades with entry_date >= 2026-02-13
       - combined: all trades
 
     from_date / to_date: optional ISO date strings to further restrict the range.
