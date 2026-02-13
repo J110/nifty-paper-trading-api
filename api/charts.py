@@ -127,19 +127,28 @@ async def get_nifty_chart(
                 daily[d]["low"] = min(daily[d]["low"], s.nifty_low or s.nifty_spot)
                 daily[d]["close"] = s.nifty_spot
 
-            candles = []
-            for d in sorted(daily.keys()):
-                data = daily[d]
-                if data["open"] is not None:
-                    candles.append({
-                        "timestamp": d,
-                        "open": data["open"],
-                        "high": data["high"],
-                        "low": data["low"],
-                        "close": data["close"],
-                        "volume": 0,
-                    })
-            return candles
+            # Only use snapshots if they cover enough of the requested period.
+            # Otherwise fall through to Dhan historical for full history.
+            min_days_needed = max(days // 3, 5)
+            if len(daily) >= min_days_needed:
+                candles = []
+                for d in sorted(daily.keys()):
+                    data = daily[d]
+                    if data["open"] is not None:
+                        candles.append({
+                            "timestamp": d,
+                            "open": data["open"],
+                            "high": data["high"],
+                            "low": data["low"],
+                            "close": data["close"],
+                            "volume": 0,
+                        })
+                return candles
+            else:
+                logger.info(
+                    "Only %d snapshot days for %d-day period, falling through to Dhan",
+                    len(daily), days,
+                )
 
         # 2. Dhan historical daily OHLC (primary fallback — real candle data)
         try:
