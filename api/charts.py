@@ -156,15 +156,46 @@ async def get_nifty_chart(
             candles_raw = await dhan.get_historical_ohlc(days=days)
             if candles_raw:
                 candles = []
+                seen_dates = set()
                 for c in candles_raw:
+                    d = _epoch_to_iso_date(c["timestamp"])
+                    seen_dates.add(d)
                     candles.append({
-                        "timestamp": _epoch_to_iso_date(c["timestamp"]),
+                        "timestamp": d,
                         "open": c["open"],
                         "high": c["high"],
                         "low": c["low"],
                         "close": c["close"],
                         "volume": c.get("volume", 0),
                     })
+
+                # Append today's data from price_snapshots if Dhan
+                # doesn't include it yet (historical API lags intraday)
+                today_str = today.isoformat()
+                if today_str not in seen_dates and snapshots:
+                    from collections import defaultdict
+                    today_snaps = [
+                        s for s in snapshots
+                        if s.timestamp.date() == today
+                    ]
+                    if today_snaps:
+                        t_open = today_snaps[0].nifty_spot
+                        t_high = max(
+                            s.nifty_high or s.nifty_spot for s in today_snaps
+                        )
+                        t_low = min(
+                            s.nifty_low or s.nifty_spot for s in today_snaps
+                        )
+                        t_close = today_snaps[-1].nifty_spot
+                        candles.append({
+                            "timestamp": today_str,
+                            "open": t_open,
+                            "high": t_high,
+                            "low": t_low,
+                            "close": t_close,
+                            "volume": 0,
+                        })
+
                 logger.info(
                     "Served %d Dhan candles for period=%s (%d days)",
                     len(candles), period, days,
