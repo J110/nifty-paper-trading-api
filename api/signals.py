@@ -96,10 +96,28 @@ async def get_current_signals(db: AsyncSession = Depends(get_db)):
     if daily_feature and daily_feature.features:
         indicators = format_indicators_for_display(daily_feature.features)
 
+    # Use latest price snapshot for current Nifty spot (prediction.nifty_spot
+    # is from 9:20 AM and goes stale throughout the day)
+    live_spot = prediction.nifty_spot  # fallback
+    live_vix = prediction.vix  # fallback
+    if prediction.date == today:
+        snap_result = await db.execute(
+            select(PriceSnapshot)
+            .where(PriceSnapshot.timestamp >= datetime.combine(today, datetime.min.time()))
+            .order_by(desc(PriceSnapshot.timestamp))
+            .limit(1)
+        )
+        latest_snap = snap_result.scalar_one_or_none()
+        if latest_snap:
+            if latest_snap.nifty_spot:
+                live_spot = latest_snap.nifty_spot
+            if latest_snap.vix:
+                live_vix = latest_snap.vix
+
     return {
         "timestamp": prediction.timestamp.isoformat() if prediction.timestamp else None,
-        "nifty_spot": prediction.nifty_spot,
-        "vix": prediction.vix,
+        "nifty_spot": live_spot,
+        "vix": live_vix,
         "predicted_drawdown": prediction.predicted_drawdown,
         "predicted_drawdown_pct": round(prediction.predicted_drawdown * 100, 2),
         "classification": classification,
