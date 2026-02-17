@@ -13,7 +13,10 @@ Requires the nifty_options_model directory to be at the same level as backend/.
 import os
 import sys
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
 
 import pandas as pd
 import joblib
@@ -95,7 +98,7 @@ async def main():
         predictions_data.append({
             "date": date_idx.date(),
             "timestamp": datetime(date_idx.year, date_idx.month, date_idx.day,
-                                  9, 20, 0, tzinfo=timezone.utc),
+                                  9, 20, 0, tzinfo=IST),
             "predicted_drawdown": pred_dd,
             "signal_type": signal,
             "nifty_spot": nifty_close,

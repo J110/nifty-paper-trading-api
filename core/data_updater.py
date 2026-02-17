@@ -25,6 +25,8 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
+from core.timezone import now_ist
+
 logger = logging.getLogger(__name__)
 
 BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -90,7 +92,7 @@ async def update_merged_daily() -> dict:
 
         # Download from a few days before last date (overlap for data corrections)
         start_date = (last_date - timedelta(days=5)).strftime("%Y-%m-%d")
-        end_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        end_date = (now_ist() + timedelta(days=1)).strftime("%Y-%m-%d")
 
         logger.info(f"Downloading data from {start_date} to {end_date}")
 
