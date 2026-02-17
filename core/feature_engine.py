@@ -170,8 +170,21 @@ async def build_live_features(dhan_client, historical_df: pd.DataFrame,
         )
 
     merged_daily = pd.read_parquet(MERGED_DAILY_PATH)
+    last_parquet_date = merged_daily.index[-1].date()
+    today = now_ist().date()
     logger.info(f"Loaded merged_daily: {len(merged_daily)} rows, "
-                f"last date: {merged_daily.index[-1].date()}")
+                f"last date: {last_parquet_date}")
+
+    # STALENESS GUARD: warn if parquet is more than 2 trading days behind
+    # (1 day behind is normal — we compute features at 9:20 AM using
+    # yesterday's close. But 2+ days means the data update failed.)
+    days_behind = (today - last_parquet_date).days
+    if days_behind > 3:  # >3 calendar days ≈ >2 trading days
+        logger.error(
+            f"STALE DATA WARNING: merged_daily.parquet last date is "
+            f"{last_parquet_date} but today is {today} ({days_behind} days behind). "
+            f"Data update may have failed! Features will be stale."
+        )
 
     # Load Dhan features if available
     dhan_features = None

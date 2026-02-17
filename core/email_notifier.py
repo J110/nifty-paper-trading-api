@@ -400,3 +400,53 @@ async def _send_email(subject: str, html: str) -> bool:
     except Exception as e:
         logger.error(f"Email send error: {e}")
         return False
+
+
+async def send_data_stale_alert(
+    last_parquet_date: str,
+    update_status: str,
+    error_msg: str = "",
+) -> bool:
+    """Send alert when daily data update fails and parquet is stale."""
+    if not RESEND_API_KEY:
+        logger.warning("RESEND_API_KEY not set — skipping stale data alert")
+        return False
+
+    subject = (
+        f"\u26A0\uFE0F DATA STALE — Parquet stuck at {last_parquet_date} | "
+        f"Predictions may be wrong!"
+    )
+
+    html = f"""
+    <div style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;background:#0d1117;border:1px solid #30363d;border-radius:12px;overflow:hidden;">
+        <div style="background:#da3633;padding:20px 24px;">
+            <h1 style="margin:0;color:#fff;font-size:20px;font-weight:600;">
+                \u26A0\uFE0F Stale Data Alert
+            </h1>
+            <p style="margin:4px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">
+                {now_ist().strftime('%d %b %Y, %I:%M %p IST')}
+            </p>
+        </div>
+        <div style="padding:20px 24px;">
+            <p style="color:#f85149;font-size:16px;font-weight:600;">
+                merged_daily.parquet is stuck at {last_parquet_date}
+            </p>
+            <p style="color:#8b949e;font-size:14px;">
+                The daily data update returned: <strong style="color:#e6edf3;">{update_status}</strong>
+            </p>
+            {"<p style='color:#8b949e;font-size:13px;'>Error: " + error_msg + "</p>" if error_msg else ""}
+            <p style="color:#f85149;font-size:14px;margin-top:16px;">
+                \u26A0\uFE0F Today's predictions will use stale features and may be incorrect.
+                Check the Yahoo Finance API or server logs.
+            </p>
+            <p style="color:#8b949e;font-size:12px;margin-top:16px;">
+                Debug: <a href="https://nifty-paper-trading-api.onrender.com/api/debug/yahoo-test"
+                style="color:#58a6ff;">/api/debug/yahoo-test</a> |
+                Trigger: POST <a href="https://nifty-paper-trading-api.onrender.com/api/update-data"
+                style="color:#58a6ff;">/api/update-data</a>
+            </p>
+        </div>
+    </div>
+    """
+
+    return await _send_email(subject, html)

@@ -20,7 +20,7 @@ from core.signal_mapper import map_signal, get_classification_breakdown
 from core.feature_engine import build_live_features
 from core.trade_manager import TradeManager
 from core.price_tracker import PriceTracker
-from core.email_notifier import send_trade_alert, send_no_trade_alert, send_exit_alert
+from core.email_notifier import send_trade_alert, send_no_trade_alert, send_exit_alert, send_data_stale_alert
 from core.data_updater import update_merged_daily
 from config import (
     ACTIVE_VERSIONS, VERSION_CONFIGS, INITIAL_CAPITAL,
@@ -146,12 +146,12 @@ async def renew_dhan_token():
 
 async def run_data_update():
     """
-    Scheduled job: update merged_daily.parquet with latest yfinance data.
+    Scheduled job: update merged_daily.parquet with latest Yahoo Finance data.
 
     Runs at 9:05 AM IST, 15 minutes before the prediction pipeline.
     This ensures yesterday's close prices are available for feature computation.
-    Failures are logged but don't block the prediction pipeline (it will use
-    whatever data is in the parquet).
+    Failures are logged and trigger an email alert, but don't block the
+    prediction pipeline (it will use whatever data is in the parquet).
     """
     logger.info("=== Starting daily data update ===")
     try:
@@ -163,13 +163,37 @@ async def run_data_update():
             )
         elif result["status"] == "already_current":
             logger.info(f"Data already current (last: {result['last_date_after']})")
-        elif result["status"] == "no_new_data":
-            logger.info("No new data available (market may be closed)")
+        elif result["status"] in ("no_new_data", "no_new_dates"):
+            # Data update didn't add anything — check if this means stale data
+            last_date = result.get("last_date_after", "unknown")
+            today = today_ist()
+            if last_date != "unknown":
+                from datetime import date
+                last_dt = date.fromisoformat(last_date)
+                days_behind = (today - last_dt).days
+                if days_behind > 3:
+                    logger.error(
+                        f"STALE DATA: parquet at {last_date}, {days_behind} days behind!"
+                    )
+                    await send_data_stale_alert(
+                        last_parquet_date=last_date,
+                        update_status=result["status"],
+                    )
+                else:
+                    logger.info(f"No new data (last: {last_date}) — normal for weekends/holidays")
         else:
             logger.warning(f"Data update result: {result}")
     except Exception as e:
         logger.error(f"Data update failed: {e}", exc_info=True)
-        # Don't raise — let the prediction pipeline run with existing data
+        # Send stale data alert on exception
+        try:
+            await send_data_stale_alert(
+                last_parquet_date="unknown",
+                update_status="exception",
+                error_msg=str(e),
+            )
+        except Exception:
+            pass  # Don't let alert failure mask the original error
     logger.info("=== Daily data update complete ===")
 
 
