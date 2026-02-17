@@ -396,6 +396,41 @@ async def update_data_endpoint():
         }
 
 
+@app.get("/api/debug/yfinance-test")
+async def debug_yfinance_test():
+    """Diagnostic: test yfinance download to debug data update failures."""
+    import traceback
+    import yfinance as yf
+    import pandas as pd
+    from core.timezone import now_ist
+    from datetime import timedelta
+
+    results = {"yfinance_version": yf.__version__, "server_time": str(now_ist())}
+    try:
+        start = (now_ist() - timedelta(days=7)).strftime("%Y-%m-%d")
+        end = (now_ist() + timedelta(days=1)).strftime("%Y-%m-%d")
+        results["download_range"] = f"{start} to {end}"
+
+        df = yf.download("^NSEI", start=start, end=end, progress=False)
+        results["raw_shape"] = list(df.shape)
+        results["raw_empty"] = df.empty
+        results["raw_columns_type"] = type(df.columns).__name__
+        results["raw_columns"] = [str(c) for c in df.columns.tolist()]
+
+        if not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            results["dates"] = [str(d.date()) for d in df.index]
+            results["last_close"] = float(df["Close"].iloc[-1])
+        else:
+            results["error"] = "yfinance returned empty DataFrame"
+    except Exception as e:
+        results["error"] = str(e)
+        results["traceback"] = traceback.format_exc()
+
+    return results
+
+
 @app.post("/api/backfill")
 async def run_backfill_endpoint():
     """

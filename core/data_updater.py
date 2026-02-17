@@ -185,16 +185,23 @@ async def update_merged_daily() -> dict:
 def _download_safe(yf, symbol: str, name: str, start: str, end: str):
     """Download a ticker from yfinance with error handling."""
     try:
+        logger.info(f"Downloading {name} ({symbol}) from {start} to {end}")
         df = yf.download(symbol, start=start, end=end, progress=False)
+        logger.info(f"  → {name} raw result: type={type(df).__name__}, "
+                    f"shape={df.shape if hasattr(df, 'shape') else 'N/A'}, "
+                    f"empty={df.empty if hasattr(df, 'empty') else 'N/A'}, "
+                    f"columns={list(df.columns) if hasattr(df, 'columns') else 'N/A'}")
         if df.empty:
             logger.warning(f"No data returned for {name} ({symbol})")
             return None
         # Handle MultiIndex columns (yfinance sometimes returns these)
         if isinstance(df.columns, pd.MultiIndex):
+            logger.info(f"  → Flattening MultiIndex columns for {name}")
             df.columns = df.columns.get_level_values(0)
         logger.info(f"Downloaded {name}: {len(df)} rows, "
                     f"{df.index[0].date()} to {df.index[-1].date()}")
         return df
     except Exception as e:
-        logger.warning(f"Failed to download {name} ({symbol}): {e}")
+        logger.warning(f"Failed to download {name} ({symbol}): {e}",
+                       exc_info=True)
         return None
