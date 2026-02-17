@@ -467,3 +467,130 @@ async def db_counts():
             except Exception as e:
                 counts[table] = f"error: {e}"
         return counts
+
+
+@app.post("/api/debug/recompute-date")
+async def debug_recompute_date(target_date: str):
+    """
+    Recompute predictions for a specific past date using current parquet data.
+    Useful for fixing stale predictions caused by data pipeline failures.
+    Does NOT touch trades — only updates Prediction and DailyFeature rows.
+    """
+    import traceback
+    from datetime import date as date_cls, datetime
+    from db.database import async_session_factory
+    from db.models import Prediction, DailyFeature
+    from core.model_runner import ModelRunner
+    from core.signal_mapper import map_signal, get_classification_breakdown
+    from core.timezone import IST
+    from config import (
+        DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH,
+        ACTIVE_VERSIONS, VERSION_CONFIGS,
+    )
+    from sqlalchemy import delete
+    import pandas as pd
+
+    try:
+        target = date_cls.fromisoformat(target_date)
+    except ValueError:
+        return {"status": "error", "message": f"Invalid date format: {target_date}. Use YYYY-MM-DD."}
+
+    try:
+        # Load model
+        mr = ModelRunner(DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH)
+
+        # Load merged_daily (server's current data)
+        merged = pd.read_parquet("/app/data/merged_daily.parquet")
+        logger.info(f"Recompute: merged_daily has {len(merged)} rows, last={merged.index[-1].date()}")
+
+        if pd.Timestamp(target) > merged.index[-1]:
+            return {"status": "error", "message": f"Target date {target} is beyond parquet data (last: {merged.index[-1].date()})"}
+
+        # Compute features for the target date using shared module
+        from shared.feature_compute import compute_features_for_date, load_dhan_options_features
+
+        dhan = None
+        try:
+            dhan = load_dhan_options_features(
+                "/app/data/dhan_raw_options.parquet",
+                "/app/data/daily_iv_skew_params.parquet",
+            )
+        except Exception as e:
+            logger.warning(f"Recompute: Dhan features unavailable: {e}")
+
+        features = compute_features_for_date(merged, target, dhan)
+        if features is None:
+            return {"status": "error", "message": f"Could not compute features for {target} (missing data?)"}
+
+        # Run model prediction
+        prediction_value = mr.predict(features)
+        logger.info(f"Recompute {target}: prediction={prediction_value*100:.4f}%")
+
+        # Store in DB (replace old predictions + features for this date)
+        async with async_session_factory() as db:
+            await db.execute(delete(Prediction).where(Prediction.date == target))
+            await db.execute(delete(DailyFeature).where(DailyFeature.date == target))
+
+            ts = datetime(target.year, target.month, target.day, 9, 20, 0, tzinfo=IST)
+
+            version_signals = {}
+            for version in ACTIVE_VERSIONS:
+                cfg = VERSION_CONFIGS[version]
+                signal = map_signal(prediction_value, cfg)
+
+                breakdown = get_classification_breakdown(prediction_value, version=version)
+                active_zone = next(
+                    (z for z in breakdown["zones"] if z.get("confidence") == "active"),
+                    None,
+                )
+                confidence = active_zone["distance_to_boundary"] if active_zone else 0
+
+                pred = Prediction(
+                    date=target,
+                    timestamp=ts,
+                    predicted_drawdown=prediction_value,
+                    signal_type=signal["signal"],
+                    version=version,
+                    nifty_spot=features.get("nifty_close", 0),
+                    vix=features.get("india_vix", 0),
+                    confidence_score=confidence,
+                    graduated_mult=signal["size_mult"],
+                    features=features,
+                )
+                db.add(pred)
+                version_signals[version] = signal["signal"]
+
+            daily_feature = DailyFeature(
+                date=target,
+                features=features,
+                vix=features.get("india_vix"),
+                vix_20d_avg=features.get("vix_20d_avg"),
+                nifty_20d_return=features.get("nifty_20d_return"),
+                nifty_50d_return=features.get("nifty_50d_return"),
+                iv_skew=features.get("iv_skew"),
+                fii_net=features.get("fii_net_5d"),
+                dii_net=features.get("dii_net_5d"),
+                put_call_ratio=features.get("put_call_ratio"),
+                rsi_14=features.get("rsi_14"),
+                adx_14=features.get("adx_14"),
+            )
+            db.add(daily_feature)
+            await db.commit()
+
+        return {
+            "status": "recomputed",
+            "date": target_date,
+            "prediction": prediction_value,
+            "prediction_pct": f"{prediction_value*100:.2f}%",
+            "versions": version_signals,
+            "features_count": len(features),
+            "nifty_close": features.get("nifty_close"),
+        }
+
+    except Exception as e:
+        logger.error(f"Recompute failed for {target_date}: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "message": str(e),
+            "traceback": traceback.format_exc(),
+        }
