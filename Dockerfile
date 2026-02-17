@@ -2,17 +2,15 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies (gcc for C extensions, curl/ssl for curl_cffi)
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
-    libcurl4-openssl-dev \
-    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Cache bust: v2
+# Cache bust: v3
 COPY . .
 
 EXPOSE 8000

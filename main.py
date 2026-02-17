@@ -396,34 +396,27 @@ async def update_data_endpoint():
         }
 
 
-@app.get("/api/debug/yfinance-test")
-async def debug_yfinance_test():
-    """Diagnostic: test yfinance download to debug data update failures."""
+@app.get("/api/debug/yahoo-test")
+async def debug_yahoo_test():
+    """Diagnostic: test Yahoo Finance direct API download."""
     import traceback
-    import yfinance as yf
-    import pandas as pd
     from core.timezone import now_ist
     from datetime import timedelta
+    from core.data_updater import _download_yahoo
 
-    results = {"yfinance_version": yf.__version__, "server_time": str(now_ist())}
+    results = {"method": "direct_yahoo_api", "server_time": str(now_ist())}
     try:
         start = (now_ist() - timedelta(days=7)).strftime("%Y-%m-%d")
         end = (now_ist() + timedelta(days=1)).strftime("%Y-%m-%d")
         results["download_range"] = f"{start} to {end}"
 
-        df = yf.download("^NSEI", start=start, end=end, progress=False)
-        results["raw_shape"] = list(df.shape)
-        results["raw_empty"] = df.empty
-        results["raw_columns_type"] = type(df.columns).__name__
-        results["raw_columns"] = [str(c) for c in df.columns.tolist()]
-
-        if not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
+        df = _download_yahoo("^NSEI", "Nifty 50", start, end)
+        if df is not None and not df.empty:
+            results["rows"] = len(df)
             results["dates"] = [str(d.date()) for d in df.index]
             results["last_close"] = float(df["Close"].iloc[-1])
         else:
-            results["error"] = "yfinance returned empty DataFrame"
+            results["error"] = "Yahoo API returned no data"
     except Exception as e:
         results["error"] = str(e)
         results["traceback"] = traceback.format_exc()

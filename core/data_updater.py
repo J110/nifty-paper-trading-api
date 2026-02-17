@@ -1,9 +1,9 @@
 """
 Automated daily data updater for merged_daily.parquet.
 
-Downloads the latest market data from yfinance and appends it to the
-existing parquet file. Runs as a scheduled job at 9:05 AM IST (before
-the 9:20 AM prediction pipeline).
+Downloads the latest market data from Yahoo Finance API (directly, no
+yfinance dependency) and appends it to the existing parquet file.
+Runs as a scheduled job at 9:05 AM IST (before the 9:20 AM prediction).
 
 This ensures the server always has yesterday's close prices available
 for feature computation — without requiring manual parquet updates
@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
+import httpx
 
 from core.timezone import now_ist
 
@@ -42,10 +43,95 @@ TICKERS = {
     "us10y": {"symbol": "^TNX", "col": "us10y_yield"},
 }
 
+YAHOO_API_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+YAHOO_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+}
+
+
+def _download_yahoo(symbol: str, name: str, start_date: str, end_date: str):
+    """
+    Download OHLCV data directly from Yahoo Finance v8 API.
+    Returns a DataFrame with DatetimeIndex and columns: Open, High, Low, Close, Volume.
+    Returns None if the download fails.
+    """
+    try:
+        # Convert dates to unix timestamps
+        start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
+        end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp())
+
+        url = YAHOO_API_URL.format(symbol=symbol)
+        params = {
+            "period1": start_ts,
+            "period2": end_ts,
+            "interval": "1d",
+            "events": "history",
+        }
+
+        logger.info(f"Downloading {name} ({symbol}) from {start_date} to {end_date}")
+
+        resp = httpx.get(url, params=params, headers=YAHOO_HEADERS,
+                         timeout=30.0, follow_redirects=True)
+        resp.raise_for_status()
+        data = resp.json()
+
+        chart = data.get("chart", {})
+        error = chart.get("error")
+        if error:
+            logger.warning(f"Yahoo API error for {name}: {error}")
+            return None
+
+        results = chart.get("result", [])
+        if not results:
+            logger.warning(f"No results for {name} ({symbol})")
+            return None
+
+        result = results[0]
+        timestamps = result.get("timestamp")
+        if not timestamps:
+            logger.warning(f"No timestamps for {name} ({symbol})")
+            return None
+
+        quotes = result["indicators"]["quote"][0]
+
+        # Build DataFrame
+        dates = pd.to_datetime([datetime.utcfromtimestamp(ts) for ts in timestamps])
+        dates = dates.normalize()  # strip time component
+
+        df = pd.DataFrame({
+            "Open": quotes.get("open"),
+            "High": quotes.get("high"),
+            "Low": quotes.get("low"),
+            "Close": quotes.get("close"),
+            "Volume": quotes.get("volume"),
+        }, index=dates)
+
+        df.index.name = "Date"
+
+        # Drop rows where Close is None/NaN
+        df = df.dropna(subset=["Close"])
+
+        if df.empty:
+            logger.warning(f"No valid data for {name} ({symbol}) after dropna")
+            return None
+
+        logger.info(f"Downloaded {name}: {len(df)} rows, "
+                    f"{df.index[0].date()} to {df.index[-1].date()}")
+        return df
+
+    except Exception as e:
+        logger.warning(f"Failed to download {name} ({symbol}): {e}",
+                       exc_info=True)
+        return None
+
 
 async def update_merged_daily() -> dict:
     """
-    Update merged_daily.parquet with the latest data from yfinance.
+    Update merged_daily.parquet with the latest data from Yahoo Finance.
 
     Strategy:
     - Read existing parquet to find last date
@@ -55,8 +141,6 @@ async def update_merged_daily() -> dict:
 
     Returns a status dict with details about what was updated.
     """
-    import yfinance as yf
-
     result = {
         "status": "unknown",
         "last_date_before": None,
@@ -80,7 +164,6 @@ async def update_merged_daily() -> dict:
         logger.info(f"Existing parquet: {len(existing)} rows, last date: {last_date.date()}")
 
         # Check if we actually need to update
-        from core.timezone import now_ist
         today = now_ist().date()
 
         # If last date is today or yesterday (data not yet available), skip
@@ -97,7 +180,7 @@ async def update_merged_daily() -> dict:
         logger.info(f"Downloading data from {start_date} to {end_date}")
 
         # Download Nifty (primary — determines trading calendar)
-        nifty = _download_safe(yf, "^NSEI", "Nifty 50", start_date, end_date)
+        nifty = _download_yahoo("^NSEI", "Nifty 50", start_date, end_date)
         if nifty is None or nifty.empty:
             logger.warning("No new Nifty data available — market may be closed")
             result["status"] = "no_new_data"
@@ -117,7 +200,7 @@ async def update_merged_daily() -> dict:
             if name == "nifty":
                 continue
             col = info["col"]
-            ticker_data = _download_safe(yf, info["symbol"], name, start_date, end_date)
+            ticker_data = _download_yahoo(info["symbol"], name, start_date, end_date)
             if ticker_data is not None and not ticker_data.empty:
                 new_data[col] = ticker_data["Close"].reindex(new_data.index, method="ffill")
             else:
@@ -180,28 +263,3 @@ async def update_merged_daily() -> dict:
         result["status"] = "error"
         result["error"] = str(e)
         return result
-
-
-def _download_safe(yf, symbol: str, name: str, start: str, end: str):
-    """Download a ticker from yfinance with error handling."""
-    try:
-        logger.info(f"Downloading {name} ({symbol}) from {start} to {end}")
-        df = yf.download(symbol, start=start, end=end, progress=False)
-        logger.info(f"  → {name} raw result: type={type(df).__name__}, "
-                    f"shape={df.shape if hasattr(df, 'shape') else 'N/A'}, "
-                    f"empty={df.empty if hasattr(df, 'empty') else 'N/A'}, "
-                    f"columns={list(df.columns) if hasattr(df, 'columns') else 'N/A'}")
-        if df.empty:
-            logger.warning(f"No data returned for {name} ({symbol})")
-            return None
-        # Handle MultiIndex columns (yfinance sometimes returns these)
-        if isinstance(df.columns, pd.MultiIndex):
-            logger.info(f"  → Flattening MultiIndex columns for {name}")
-            df.columns = df.columns.get_level_values(0)
-        logger.info(f"Downloaded {name}: {len(df)} rows, "
-                    f"{df.index[0].date()} to {df.index[-1].date()}")
-        return df
-    except Exception as e:
-        logger.warning(f"Failed to download {name} ({symbol}): {e}",
-                       exc_info=True)
-        return None
