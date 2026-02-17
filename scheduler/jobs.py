@@ -20,7 +20,10 @@ from core.signal_mapper import map_signal, get_classification_breakdown
 from core.feature_engine import build_live_features
 from core.trade_manager import TradeManager
 from core.price_tracker import PriceTracker
-from core.email_notifier import send_trade_alert, send_no_trade_alert, send_exit_alert, send_data_stale_alert
+from core.email_notifier import (
+    send_trade_alert, send_no_trade_alert, send_exit_alert,
+    send_data_stale_alert, send_pipeline_failure_alert,
+)
 from core.data_updater import update_merged_daily
 from config import (
     ACTIVE_VERSIONS, VERSION_CONFIGS, INITIAL_CAPITAL,
@@ -479,6 +482,15 @@ async def generate_daily_predictions():
 
     except Exception as e:
         logger.error(f"Daily prediction pipeline failed: {e}", exc_info=True)
+        # Send pipeline failure email
+        try:
+            await send_pipeline_failure_alert(
+                pipeline_name="Daily Prediction Pipeline",
+                error_msg=str(e),
+                stage="prediction_generation",
+            )
+        except Exception:
+            pass  # Don't let alert failure mask the original error
         raise  # Re-raise so callers (manual trigger) can see the error
 
 
@@ -519,7 +531,15 @@ async def check_all_exits():
                             )
 
     except Exception as e:
-        logger.error(f"Exit check failed: {e}")
+        logger.error(f"Exit check failed: {e}", exc_info=True)
+        try:
+            await send_pipeline_failure_alert(
+                pipeline_name="Exit Check",
+                error_msg=str(e),
+                stage="check_exits",
+            )
+        except Exception:
+            pass
 
 
 async def eod_processing():
@@ -600,3 +620,11 @@ async def eod_processing():
 
     except Exception as e:
         logger.error(f"EOD processing failed: {e}", exc_info=True)
+        try:
+            await send_pipeline_failure_alert(
+                pipeline_name="EOD Processing",
+                error_msg=str(e),
+                stage="eod_processing",
+            )
+        except Exception:
+            pass

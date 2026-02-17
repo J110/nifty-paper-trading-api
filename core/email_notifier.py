@@ -402,6 +402,67 @@ async def _send_email(subject: str, html: str) -> bool:
         return False
 
 
+async def send_pipeline_failure_alert(
+    pipeline_name: str,
+    error_msg: str,
+    stage: str = "",
+) -> bool:
+    """Send alert when a scheduled pipeline (prediction, exit check, EOD) fails."""
+    if not RESEND_API_KEY:
+        logger.warning("RESEND_API_KEY not set — skipping pipeline failure alert")
+        return False
+
+    emoji = "\U0001F6A8"  # 🚨
+    subject = (
+        f"{emoji} PIPELINE FAILED — {pipeline_name} | "
+        f"{now_ist().strftime('%d %b %Y, %I:%M %p IST')}"
+    )
+
+    html = f"""
+    <div style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;background:#0d1117;border:1px solid #30363d;border-radius:12px;overflow:hidden;">
+        <div style="background:#da3633;padding:20px 24px;">
+            <h1 style="margin:0;color:#fff;font-size:20px;font-weight:600;">
+                {emoji} Pipeline Failure
+            </h1>
+            <p style="margin:4px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">
+                {now_ist().strftime('%d %b %Y, %I:%M %p IST')}
+            </p>
+        </div>
+        <div style="padding:20px 24px;">
+            <table style="width:100%;border-collapse:collapse;background:#161b22;border-radius:8px;">
+                <tr>
+                    <td style="color:#8b949e;padding:6px 12px;">Pipeline</td>
+                    <td style="color:#e6edf3;padding:6px 12px;font-weight:600;">{pipeline_name}</td>
+                </tr>
+                {"<tr><td style='color:#8b949e;padding:6px 12px;'>Stage</td><td style='color:#e6edf3;padding:6px 12px;font-weight:600;'>" + stage + "</td></tr>" if stage else ""}
+                <tr>
+                    <td style="color:#8b949e;padding:6px 12px;">Error</td>
+                    <td style="color:#f85149;padding:6px 12px;font-weight:600;font-size:12px;word-break:break-all;">
+                        {error_msg[:500]}
+                    </td>
+                </tr>
+            </table>
+            <p style="color:#8b949e;font-size:13px;margin-top:16px;">
+                Check server logs on
+                <a href="https://dashboard.render.com/" style="color:#58a6ff;">Render Dashboard</a>
+                for full error details.
+            </p>
+            <p style="color:#8b949e;font-size:12px;margin-top:8px;">
+                Manual trigger: POST <a href="https://nifty-paper-trading-api.onrender.com/api/trigger-prediction"
+                style="color:#58a6ff;">/api/trigger-prediction</a>
+            </p>
+        </div>
+        <div style="padding:12px 24px 16px;border-top:1px solid #21262d;">
+            <p style="color:#484f58;font-size:11px;margin:0;text-align:center;">
+                Paper Trading Bot &bull; Pipeline Failure Alert
+            </p>
+        </div>
+    </div>
+    """
+
+    return await _send_email(subject, html)
+
+
 async def send_data_stale_alert(
     last_parquet_date: str,
     update_status: str,
