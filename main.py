@@ -469,6 +469,60 @@ async def db_counts():
         return counts
 
 
+@app.post("/api/debug/test-email")
+async def debug_test_email():
+    """Send a test email to verify Resend API key and email delivery."""
+    import os
+    import httpx
+
+    api_key = os.environ.get("RESEND_API_KEY", "")
+    notify_email = os.environ.get("NOTIFY_EMAIL", "anmol@turings.xyz")
+    from_email = "Nifty Trading Bot <onboarding@resend.dev>"
+
+    if not api_key:
+        return {"status": "error", "message": "RESEND_API_KEY not set in environment"}
+
+    # Show config (mask API key)
+    config_info = {
+        "api_key_set": bool(api_key),
+        "api_key_prefix": api_key[:10] + "..." if len(api_key) > 10 else "too_short",
+        "api_key_length": len(api_key),
+        "notify_email": notify_email,
+        "from_email": from_email,
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "from": from_email,
+                    "to": [notify_email],
+                    "subject": "Test Email from Nifty Trading Bot",
+                    "html": "<h2>Email delivery is working!</h2><p>This is a test email from your Nifty Trading Bot.</p>",
+                },
+                timeout=10,
+            )
+
+            return {
+                "status": "sent" if response.status_code in (200, 202) else "failed",
+                "resend_status_code": response.status_code,
+                "resend_response": response.json() if response.status_code < 500 else response.text,
+                "config": config_info,
+            }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "config": config_info,
+        }
+
+
 @app.post("/api/debug/recompute-date")
 async def debug_recompute_date(target_date: str):
     """

@@ -389,7 +389,7 @@ async def _send_email(subject: str, html: str) -> bool:
                 timeout=10,
             )
 
-            if response.status_code == 200:
+            if response.status_code in (200, 202):
                 data = response.json()
                 logger.info(f"Email sent successfully: {data.get('id', 'unknown')}")
                 return True
