@@ -290,25 +290,115 @@ def _format_value(feature_name: str, value) -> str:
         return str(round(value, 2))
 
 
+def _generate_summary(
+    reasons: list,
+    predicted_drawdown: Optional[float],
+) -> str:
+    """
+    Generate a plain-English summary explaining the prediction.
+
+    The model's prediction is driven by feature importances — a feature
+    classified as "neutral" can still push the prediction negative if the
+    model learned that value range correlates with drawdowns. This summary
+    explains that nuance in laymen's terms.
+    """
+    if not reasons:
+        return ""
+
+    pct = abs(predicted_drawdown * 100) if predicted_drawdown else 0
+
+    # Weighted direction: sum importance for each direction
+    weighted = {"bullish": 0.0, "bearish": 0.0, "neutral": 0.0}
+    for r in reasons:
+        weighted[r["direction"]] += r["importance_pct"]
+
+    # Identify the dominant driver(s)
+    top = reasons[0]  # most important feature
+    top2 = reasons[1] if len(reasons) > 1 else None
+
+    # Build the narrative
+    parts = []
+
+    # Overall assessment
+    if pct >= 6.5:
+        parts.append(
+            f"The model predicts a significant -{pct:.1f}% potential drawdown."
+        )
+    elif pct >= 5.0:
+        parts.append(
+            f"The model predicts a moderate -{pct:.1f}% potential drawdown."
+        )
+    elif pct >= 3.8:
+        parts.append(
+            f"The model predicts a mild -{pct:.1f}% potential drawdown."
+        )
+    else:
+        parts.append(
+            f"The model predicts a low -{pct:.1f}% potential drawdown."
+        )
+
+    # Explain the top driver
+    parts.append(
+        f"The biggest driver is {top['label']} ({top['formatted_value']}), "
+        f"which carries {top['importance_pct']:.0f}% of the model's weight."
+    )
+
+    # Explain why neutral features still matter
+    if weighted["neutral"] > weighted["bearish"] and weighted["neutral"] > weighted["bullish"]:
+        neutral_reasons = [r for r in reasons if r["direction"] == "neutral"]
+        neutral_weight = sum(r["importance_pct"] for r in neutral_reasons)
+        parts.append(
+            f"Most top features ({len(neutral_reasons)} of {len(reasons)}) are in neutral ranges, "
+            f"but they still account for {neutral_weight:.0f}% of the model's weight. "
+            f"The model learned that these 'in-between' levels historically precede moderate drawdowns."
+        )
+
+    # Mention bullish factors as counterbalance
+    bullish_reasons = [r for r in reasons if r["direction"] == "bullish"]
+    if bullish_reasons:
+        bullish_labels = [r["label"] for r in bullish_reasons[:2]]
+        bullish_weight = sum(r["importance_pct"] for r in bullish_reasons)
+        parts.append(
+            f"{' and '.join(bullish_labels)} {'are' if len(bullish_labels) > 1 else 'is'} "
+            f"providing a bullish offset ({bullish_weight:.0f}% weight), "
+            f"which is why the prediction isn't even more negative."
+        )
+
+    # Mention bearish factors
+    bearish_reasons = [r for r in reasons if r["direction"] == "bearish"]
+    if bearish_reasons:
+        bearish_labels = [r["label"] for r in bearish_reasons[:2]]
+        parts.append(
+            f"{' and '.join(bearish_labels)} {'are' if len(bearish_labels) > 1 else 'is'} "
+            f"actively bearish, adding downside pressure."
+        )
+
+    return " ".join(parts)
+
+
 def generate_prediction_reasons(
     features: dict,
     feature_importances: dict,
     top_n: int = 7,
-) -> list:
+    predicted_drawdown: Optional[float] = None,
+) -> dict:
     """
-    Generate ranked list of reasons explaining the prediction.
+    Generate ranked list of reasons explaining the prediction, plus a
+    plain-English summary narrative.
 
     Args:
         features:            Dict of 37 feature values (from Prediction.features)
         feature_importances: Dict of {feature_name: importance_weight} from model
         top_n:               Number of top reasons to return
+        predicted_drawdown:  The model's predicted drawdown (decimal, e.g. -0.0777)
 
     Returns:
-        List of dicts sorted by importance, each with:
-          label, formatted_value, direction, importance_pct, reason
+        Dict with:
+          reasons: list of dicts (label, formatted_value, direction, importance_pct, reason)
+          summary: plain-English narrative string
     """
     if not features or not feature_importances:
-        return []
+        return {"reasons": [], "summary": ""}
 
     # Total importance for percentage calculation
     total_importance = sum(feature_importances.values()) or 1.0
@@ -345,4 +435,8 @@ def generate_prediction_reasons(
 
     # Sort by importance (descending) and take top N
     reasons.sort(key=lambda r: r["importance_pct"], reverse=True)
-    return reasons[:top_n]
+    top_reasons = reasons[:top_n]
+
+    summary = _generate_summary(top_reasons, predicted_drawdown)
+
+    return {"reasons": top_reasons, "summary": summary}

@@ -100,13 +100,17 @@ async def get_current_signals(db: AsyncSession = Depends(get_db)):
 
     # Build prediction reasoning (top features driving the prediction)
     prediction_reasons = []
+    prediction_summary = ""
     if daily_feature and daily_feature.features:
         try:
             mr = get_model_runner()
             importances = mr.get_feature_importances()
-            prediction_reasons = generate_prediction_reasons(
-                daily_feature.features, importances, top_n=7
+            reasoning = generate_prediction_reasons(
+                daily_feature.features, importances, top_n=7,
+                predicted_drawdown=prediction.predicted_drawdown,
             )
+            prediction_reasons = reasoning["reasons"]
+            prediction_summary = reasoning["summary"]
         except Exception as e:
             logger.warning(f"Failed to generate prediction reasons: {e}")
 
@@ -138,6 +142,7 @@ async def get_current_signals(db: AsyncSession = Depends(get_db)):
         "version_signals": version_signals,
         "indicators": indicators,
         "prediction_reasons": prediction_reasons,
+        "prediction_summary": prediction_summary,
         "confidence_score": prediction.confidence_score,
         "status": "active" if prediction.date == today else "latest_available",
         "prediction_date": prediction.date.isoformat(),
