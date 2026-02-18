@@ -119,7 +119,14 @@ async def get_current_signals(db: AsyncSession = Depends(get_db)):
     # Always fetch the most recent snapshot (even across days — e.g. on
     # mornings before today's prediction runs, show yesterday's close).
     live_spot = prediction.nifty_spot  # fallback
-    live_vix = prediction.vix  # fallback
+    # VIX in the header should match the model's input (from features),
+    # not the latest snapshot — avoids confusing mismatch with the
+    # India VIX indicator which shows the model's feature value.
+    model_vix = None
+    if daily_feature and daily_feature.features:
+        model_vix = daily_feature.features.get("india_vix")
+    live_vix = model_vix if model_vix else prediction.vix
+
     snap_result = await db.execute(
         select(PriceSnapshot)
         .order_by(desc(PriceSnapshot.timestamp))
@@ -129,8 +136,6 @@ async def get_current_signals(db: AsyncSession = Depends(get_db)):
     if latest_snap:
         if latest_snap.nifty_spot:
             live_spot = latest_snap.nifty_spot
-        if latest_snap.vix:
-            live_vix = latest_snap.vix
 
     return {
         "timestamp": prediction.timestamp.isoformat() if prediction.timestamp else None,
