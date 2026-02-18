@@ -13,6 +13,8 @@ from db.models import Prediction, DailyFeature, Trade, PriceSnapshot, DailyPnl
 from core.timezone import now_ist, today_ist, IST
 from core.signal_mapper import map_signal, get_classification_breakdown
 from core.feature_engine import format_indicators_for_display
+from core.model_runner import get_model_runner
+from core.prediction_reasoning import generate_prediction_reasons
 from config import VERSION_CONFIGS, ACTIVE_VERSIONS
 
 logger = logging.getLogger(__name__)
@@ -96,6 +98,18 @@ async def get_current_signals(db: AsyncSession = Depends(get_db)):
     if daily_feature and daily_feature.features:
         indicators = format_indicators_for_display(daily_feature.features)
 
+    # Build prediction reasoning (top features driving the prediction)
+    prediction_reasons = []
+    if daily_feature and daily_feature.features:
+        try:
+            mr = get_model_runner()
+            importances = mr.get_feature_importances()
+            prediction_reasons = generate_prediction_reasons(
+                daily_feature.features, importances, top_n=7
+            )
+        except Exception as e:
+            logger.warning(f"Failed to generate prediction reasons: {e}")
+
     # Use latest price snapshot for current Nifty spot & VIX.
     # prediction.nifty_spot is from 9:20 AM and goes stale.
     # Always fetch the most recent snapshot (even across days — e.g. on
@@ -123,6 +137,7 @@ async def get_current_signals(db: AsyncSession = Depends(get_db)):
         "classification": classification,
         "version_signals": version_signals,
         "indicators": indicators,
+        "prediction_reasons": prediction_reasons,
         "confidence_score": prediction.confidence_score,
         "status": "active" if prediction.date == today else "latest_available",
         "prediction_date": prediction.date.isoformat(),

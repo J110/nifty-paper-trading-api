@@ -10,6 +10,18 @@ import joblib
 
 logger = logging.getLogger(__name__)
 
+# Singleton instance — shared between scheduler and API layer
+_singleton_runner = None
+
+
+def get_model_runner():
+    """Return a shared ModelRunner instance (lazy-loaded singleton)."""
+    global _singleton_runner
+    if _singleton_runner is None:
+        from config import DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH
+        _singleton_runner = ModelRunner(DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH)
+    return _singleton_runner
+
 
 class ModelRunner:
     """
