@@ -100,6 +100,8 @@ async def health_check():
     # Quick DB check: is today's prediction present?
     today_predictions = 0
     last_prediction_date = None
+    db_healthy = False
+    db_error = None
     try:
         async with async_session_factory() as db:
             result = await db.execute(
@@ -113,15 +115,20 @@ async def health_check():
                 select(func.max(Prediction.date))
             )
             last_prediction_date = result2.scalar()
-    except Exception:
-        pass  # Don't fail health check if DB is slow
+            db_healthy = True
+    except Exception as e:
+        db_error = str(e)
+        logger.error(f"Health check DB query failed: {e}")
 
     scheduler_running = scheduler is not None and scheduler.running
+    overall_healthy = db_healthy and scheduler_running
 
     return {
-        "status": "healthy",
+        "status": "healthy" if overall_healthy else "degraded",
         "service": "nifty-paper-trading-api",
         "version": "1.0.0",
+        "db_healthy": db_healthy,
+        "db_error": db_error,
         "scheduler_running": scheduler_running,
         "today_predictions": today_predictions,
         "last_prediction_date": last_prediction_date.isoformat() if last_prediction_date else None,

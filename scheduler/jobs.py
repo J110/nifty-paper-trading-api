@@ -130,8 +130,8 @@ async def renew_dhan_token():
 
     Runs at 8:30 AM IST daily (before any market data calls).
     The token must still be active (not expired) for renewal to work.
-    If renewal fails (e.g. token already expired), the pipeline will
-    still work using parquet data — just without live spot/VIX/option chain.
+    If renewal fails, sends an alert — live spot/VIX/option chain
+    will be unavailable for the rest of the day.
     """
     logger.info("=== Starting Dhan token renewal ===")
     try:
@@ -140,10 +140,14 @@ async def renew_dhan_token():
         logger.info(f"Token renewal SUCCESS — new token expires: {expiry}")
     except Exception as e:
         logger.error(f"Token renewal FAILED: {e}")
-        logger.error(
-            "Dhan API will not work until token is manually updated. "
-            "Pipeline will fall back to parquet data."
-        )
+        try:
+            await send_pipeline_failure_alert(
+                pipeline_name="Dhan Token Renewal",
+                error_msg=str(e),
+                stage="token_renewal",
+            )
+        except Exception:
+            pass
     logger.info("=== Dhan token renewal complete ===")
 
 
@@ -186,7 +190,13 @@ async def run_data_update():
                 else:
                     logger.info(f"No new data (last: {last_date}) — normal for weekends/holidays")
         else:
-            logger.warning(f"Data update result: {result}")
+            # Unexpected status (including "error") — send alert
+            logger.error(f"Data update unexpected result: {result}")
+            await send_data_stale_alert(
+                last_parquet_date=result.get("last_date_after", "unknown"),
+                update_status=result.get("status", "unknown"),
+                error_msg=f"Unexpected data update result: {result}",
+            )
     except Exception as e:
         logger.error(f"Data update failed: {e}", exc_info=True)
         # Send stale data alert on exception
@@ -231,7 +241,15 @@ async def check_and_recover_missed_prediction():
             await dhan_client.renew_token()
             logger.info("Startup token renewal succeeded")
         except Exception as e:
-            logger.warning(f"Startup token renewal failed (will use parquet fallback): {e}")
+            logger.error(f"Startup token renewal failed: {e}")
+            try:
+                await send_pipeline_failure_alert(
+                    pipeline_name="Startup Token Renewal",
+                    error_msg=str(e),
+                    stage="startup_recovery",
+                )
+            except Exception:
+                pass
 
         # Update parquet data before running prediction recovery
         logger.info("Startup recovery: updating parquet data first...")
@@ -240,7 +258,15 @@ async def check_and_recover_missed_prediction():
             logger.info(f"Startup data update: {update_result.get('status')}, "
                         f"last date: {update_result.get('last_date_after')}")
         except Exception as e:
-            logger.warning(f"Startup data update failed (will use existing): {e}")
+            logger.error(f"Startup data update failed: {e}")
+            try:
+                await send_data_stale_alert(
+                    last_parquet_date="unknown",
+                    update_status="startup_exception",
+                    error_msg=f"Startup data update failed: {e}",
+                )
+            except Exception:
+                pass
 
         # Check if today's prediction exists in DB
         today = current_time.date()
@@ -271,19 +297,28 @@ async def check_and_recover_missed_prediction():
                 f"Startup recovery BLOCKED — data too stale: {e}. "
                 f"No predictions generated. Fix data pipeline and trigger manually."
             )
+            # StaleDataError alert is already sent inside generate_daily_predictions()
 
     except Exception as e:
         logger.error(f"Startup recovery check failed: {e}", exc_info=True)
+        try:
+            await send_pipeline_failure_alert(
+                pipeline_name="Startup Recovery",
+                error_msg=str(e),
+                stage="startup_recovery",
+            )
+        except Exception:
+            pass
 
 
 async def record_price_snapshot():
-    """Record Nifty spot + VIX snapshot every 5 minutes."""
+    """Record Nifty spot + VIX snapshot every 15 minutes."""
     try:
         spot = await dhan_client.get_nifty_ltp()
         vix = await dhan_client.get_india_vix()
 
         if spot is None:
-            logger.warning("Failed to get Nifty LTP for snapshot")
+            logger.warning("Failed to get Nifty LTP for snapshot — Dhan API may be down")
             return
 
         async with async_session_factory() as db:
@@ -435,7 +470,7 @@ async def generate_daily_predictions():
                                 predicted_drawdown=prediction_value,
                             )
 
-                            if trade_result:
+                            if trade_result and isinstance(trade_result, dict):
                                 spread_price = trade_result.get("credit", 0) or trade_result.get("debit", 0)
                                 await price_tracker.record_initial_price(
                                     trade_id=trade_result["trade_id"],
@@ -449,7 +484,14 @@ async def generate_daily_predictions():
                                 trades_opened.append((version, signal, trade_result))
                         except Exception as e:
                             logger.error(f"[{version}] Failed to open trade: {e}")
-                            # Don't let trade opening failure prevent prediction storage
+                            try:
+                                await send_pipeline_failure_alert(
+                                    pipeline_name="Trade Opening",
+                                    error_msg=f"[{version}] {e}",
+                                    stage="open_trade",
+                                )
+                            except Exception:
+                                pass
 
                 await db.commit()
                 logger.info("DB commit successful")
@@ -526,6 +568,12 @@ async def check_all_exits():
         vix = await dhan_client.get_india_vix()
 
         if spot is None:
+            logger.error("EXIT CHECK FAILED: Cannot get Nifty spot price — Dhan API down")
+            await send_pipeline_failure_alert(
+                pipeline_name="Exit Check",
+                error_msg="Cannot get Nifty spot price (Dhan API returned None). Exit checks SKIPPED — open trades were NOT evaluated for stop-loss or expiry.",
+                stage="check_exits",
+            )
             return
 
         async with async_session_factory() as db:
@@ -576,7 +624,12 @@ async def eod_processing():
         vix = await dhan_client.get_india_vix()
 
         if spot is None:
-            logger.error("Cannot do EOD: no Nifty price")
+            logger.error("EOD FAILED: Cannot get Nifty spot price — Dhan API down")
+            await send_pipeline_failure_alert(
+                pipeline_name="EOD Processing",
+                error_msg="Cannot get Nifty spot price (Dhan API returned None). EOD processing SKIPPED — no PnL recorded, no final exit checks.",
+                stage="eod_processing",
+            )
             return
 
         async with async_session_factory() as db:

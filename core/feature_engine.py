@@ -219,7 +219,7 @@ async def build_live_features(dhan_client, historical_df: pd.DataFrame,
         vix = await dhan_client.get_india_vix()
     except Exception as e:
         logger.warning(f"Failed to fetch live prices for display: {e}")
-        spot = features.get("india_vix", 24000)
+        spot = float(merged_daily['nifty_close'].iloc[-1])
         vix = features.get("india_vix", 14.0)
 
     # Add display-friendly aliases for the frontend (not model inputs)
