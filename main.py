@@ -567,8 +567,17 @@ async def debug_recompute_date(target_date: str):
         if pd.Timestamp(target) > merged.index[-1]:
             return {"status": "error", "message": f"Target date {target} is beyond parquet data (last: {merged.index[-1].date()})"}
 
-        # Compute features for the target date using shared module
+        # Compute features using the PREVIOUS trading day's data.
+        # This matches how the live system works: at 9:20 AM on date X,
+        # only data through X-1 (yesterday's close) is available.
         from shared.feature_compute import compute_features_for_date, load_dhan_options_features
+
+        target_ts = pd.Timestamp(target)
+        dates_before = merged.index[merged.index < target_ts]
+        if len(dates_before) == 0:
+            return {"status": "error", "message": f"No data before {target} to compute features from"}
+        prev_trading_day = dates_before[-1]
+        logger.info(f"Recompute {target}: using data through {prev_trading_day.date()} (previous trading day)")
 
         dhan = None
         try:
@@ -579,7 +588,7 @@ async def debug_recompute_date(target_date: str):
         except Exception as e:
             logger.warning(f"Recompute: Dhan features unavailable: {e}")
 
-        features = compute_features_for_date(merged, target, dhan)
+        features = compute_features_for_date(merged, prev_trading_day, dhan)
         if features is None:
             return {"status": "error", "message": f"Could not compute features for {target} (missing data?)"}
 
@@ -641,6 +650,7 @@ async def debug_recompute_date(target_date: str):
         return {
             "status": "recomputed",
             "date": target_date,
+            "data_through": str(prev_trading_day.date()),
             "prediction": prediction_value,
             "prediction_pct": f"{prediction_value*100:.2f}%",
             "versions": version_signals,
