@@ -47,8 +47,15 @@ async def lifespan(app: FastAPI):
     logger.info("APScheduler started")
 
     # Check if we missed today's prediction (server restart recovery)
+    # Delay recovery by 30s so the server binds to port first
+    # (Render free tier times out if port isn't open quickly)
     import asyncio
-    asyncio.create_task(check_and_recover_missed_prediction())
+
+    async def _delayed_recovery():
+        await asyncio.sleep(30)
+        await check_and_recover_missed_prediction()
+
+    asyncio.create_task(_delayed_recovery())
 
     yield
 
