@@ -665,7 +665,7 @@ async def debug_delete_trade(trade_id: str):
     Returns the deleted trade details for confirmation.
     """
     from db.database import async_session_factory
-    from db.models import Trade
+    from db.models import Trade, DelayPrice
     from sqlalchemy import select, delete
 
     try:
@@ -690,7 +690,9 @@ async def debug_delete_trade(trade_id: str):
                 "realized_pnl": trade.realized_pnl,
             }
 
-            # Delete it
+            # Delete related rows first (foreign key constraints)
+            await db.execute(delete(DelayPrice).where(DelayPrice.trade_id == trade_id))
+            # Delete the trade
             await db.execute(delete(Trade).where(Trade.trade_id == trade_id))
             await db.commit()
 
