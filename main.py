@@ -648,3 +648,50 @@ async def debug_recompute_date(target_date: str):
             "message": str(e),
             "traceback": traceback.format_exc(),
         }
+
+
+@app.post("/api/debug/delete-trade")
+async def debug_delete_trade(trade_id: str):
+    """
+    Delete a specific trade by trade_id.
+    Use this to remove trades that were opened on stale/incorrect data.
+    Returns the deleted trade details for confirmation.
+    """
+    from db.database import async_session_factory
+    from db.models import Trade
+    from sqlalchemy import select, delete
+
+    try:
+        async with async_session_factory() as db:
+            # First, fetch the trade to show what's being deleted
+            result = await db.execute(
+                select(Trade).where(Trade.trade_id == trade_id)
+            )
+            trade = result.scalar_one_or_none()
+
+            if not trade:
+                return {"status": "not_found", "message": f"No trade found with id: {trade_id}"}
+
+            trade_info = {
+                "trade_id": trade.trade_id,
+                "version": trade.version,
+                "entry_date": str(trade.entry_date),
+                "trade_type": trade.trade_type,
+                "status": trade.status,
+                "entry_spot": trade.entry_spot,
+                "predicted_drawdown": trade.predicted_drawdown,
+                "realized_pnl": trade.realized_pnl,
+            }
+
+            # Delete it
+            await db.execute(delete(Trade).where(Trade.trade_id == trade_id))
+            await db.commit()
+
+            return {
+                "status": "deleted",
+                "deleted_trade": trade_info,
+            }
+
+    except Exception as e:
+        logger.error(f"Delete trade failed for {trade_id}: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}

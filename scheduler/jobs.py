@@ -17,7 +17,7 @@ from core.timezone import now_ist, today_ist
 from core.dhan_client import DhanClient
 from core.model_runner import ModelRunner
 from core.signal_mapper import map_signal, get_classification_breakdown
-from core.feature_engine import build_live_features
+from core.feature_engine import build_live_features, StaleDataError
 from core.trade_manager import TradeManager
 from core.price_tracker import PriceTracker
 from core.email_notifier import (
@@ -153,8 +153,9 @@ async def run_data_update():
 
     Runs at 9:05 AM IST, 15 minutes before the prediction pipeline.
     This ensures yesterday's close prices are available for feature computation.
-    Failures are logged and trigger an email alert, but don't block the
-    prediction pipeline (it will use whatever data is in the parquet).
+    Failures are logged and trigger an email alert. If the parquet remains
+    >3 calendar days stale, the prediction pipeline will REFUSE to run
+    (raises StaleDataError) to prevent opening trades on wrong signals.
     """
     logger.info("=== Starting daily data update ===")
     try:
@@ -262,8 +263,14 @@ async def check_and_recover_missed_prediction():
             f"Startup recovery: NO predictions for {today} and it's {current_time.strftime('%H:%M')} IST. "
             f"Running missed prediction pipeline..."
         )
-        await generate_daily_predictions()
-        logger.info("Startup recovery: prediction pipeline completed")
+        try:
+            await generate_daily_predictions()
+            logger.info("Startup recovery: prediction pipeline completed")
+        except StaleDataError as e:
+            logger.error(
+                f"Startup recovery BLOCKED — data too stale: {e}. "
+                f"No predictions generated. Fix data pipeline and trigger manually."
+            )
 
     except Exception as e:
         logger.error(f"Startup recovery check failed: {e}", exc_info=True)
@@ -479,6 +486,24 @@ async def generate_daily_predictions():
                 logger.error(f"Failed to send no-trade alert email: {e}")
 
         logger.info("=== Daily prediction pipeline complete ===")
+
+    except StaleDataError as e:
+        # HARD BLOCK: data is too stale — do NOT generate predictions or open trades
+        logger.error(f"PREDICTION BLOCKED — STALE DATA: {e}")
+        try:
+            await send_data_stale_alert(
+                last_parquet_date=str(e),
+                update_status="prediction_blocked",
+                error_msg=(
+                    "The prediction pipeline was BLOCKED because the data is too stale. "
+                    "No predictions were generated and no trades were opened. "
+                    "Fix the data update pipeline (check Yahoo API / Dhan token) "
+                    "and trigger a manual data update + prediction via the API."
+                ),
+            )
+        except Exception:
+            pass
+        raise  # Re-raise so callers can see the error
 
     except Exception as e:
         logger.error(f"Daily prediction pipeline failed: {e}", exc_info=True)

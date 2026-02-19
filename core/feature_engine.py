@@ -15,6 +15,11 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+
+class StaleDataError(Exception):
+    """Raised when merged_daily.parquet is too stale for reliable predictions."""
+    pass
+
 # BACKEND_ROOT = directory containing core/, shared/, data/, ml/
 # Locally: /Users/.../Options Trading/backend
 # In Docker: /app
@@ -175,15 +180,16 @@ async def build_live_features(dhan_client, historical_df: pd.DataFrame,
     logger.info(f"Loaded merged_daily: {len(merged_daily)} rows, "
                 f"last date: {last_parquet_date}")
 
-    # STALENESS GUARD: warn if parquet is more than 2 trading days behind
+    # STALENESS GUARD: HARD BLOCK if parquet is more than 2 trading days behind.
     # (1 day behind is normal — we compute features at 9:20 AM using
     # yesterday's close. But 2+ days means the data update failed.)
+    # This prevents opening trades based on stale/wrong predictions.
     days_behind = (today - last_parquet_date).days
     if days_behind > 3:  # >3 calendar days ≈ >2 trading days
-        logger.error(
-            f"STALE DATA WARNING: merged_daily.parquet last date is "
-            f"{last_parquet_date} but today is {today} ({days_behind} days behind). "
-            f"Data update may have failed! Features will be stale."
+        raise StaleDataError(
+            f"merged_daily.parquet is {days_behind} days stale "
+            f"(last: {last_parquet_date}, today: {today}). "
+            f"Data update likely failed — refusing to generate predictions."
         )
 
     # Load Dhan features if available
