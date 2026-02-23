@@ -66,7 +66,7 @@ def map_signal_graduated(pred: float, floor: float = 0.50,
     floor: minimum size multiplier (0.5 = always at least 50% position)
     hw: transition half-width in percentage points (0.5 = ±0.5% transition zone)
 
-    Uses backtest thresholds: -3.8% / -5.0% / -6.5%
+    Uses optimized thresholds: -2.0% / -4.7% / -7.6%
     """
     pred_pct = pred * 100  # -0.012 → -1.2
 
@@ -139,9 +139,9 @@ def map_signal_directional_bear(pred: float, version_cfg: dict) -> dict:
     floor = version_cfg.get("GRADUATED_FLOOR", 0.80)
     hw_pct = version_cfg.get("GRADUATED_HW", 0.25)  # in percentage points
 
-    t1 = THRESH_BULL_FULL   # -0.038
-    t2 = THRESH_BULL_HALF   # -0.050
-    t3 = THRESH_IC          # -0.065
+    t1 = THRESH_BULL_FULL   # -0.020
+    t2 = THRESH_BULL_HALF   # -0.047
+    t3 = THRESH_IC          # -0.076
     hw = hw_pct / 100.0     # convert to decimal
 
     bear_threshold = version_cfg.get("BEAR_DEBIT_THRESHOLD", -0.065)

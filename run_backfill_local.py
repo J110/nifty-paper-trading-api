@@ -146,7 +146,7 @@ async def run_backfill():
 
             # Confidence score (simple: distance from nearest threshold)
             pred_dd = pred.get('predicted_drawdown', 0)
-            thresholds = [-0.038, -0.050, -0.065]
+            thresholds = [-0.020, -0.047, -0.076]
             confidence = min(abs(pred_dd - t) for t in thresholds) if thresholds else 0.5
 
             await conn.execute("""
