@@ -34,9 +34,9 @@ def model_signal(model, features_row, feature_cols, config_dict=None):
     predicted_dd = model.predict(X)[0]
 
     cfg = config_dict or {}
-    bull_full_t = cfg.get('DRAWDOWN_BULL_FULL', -0.038)
-    bull_half_t = cfg.get('DRAWDOWN_BULL_HALF', -0.050)
-    ic_t = cfg.get('DRAWDOWN_IRON_CONDOR', -0.065)
+    bull_full_t = cfg.get('DRAWDOWN_BULL_FULL', -0.020)
+    bull_half_t = cfg.get('DRAWDOWN_BULL_HALF', -0.047)
+    ic_t = cfg.get('DRAWDOWN_IRON_CONDOR', -0.076)
     bear_half_t = cfg.get('DRAWDOWN_BEAR_HALF', -0.140)
     bear_full_t = cfg.get('DRAWDOWN_BEAR_FULL', -0.170)
     bear_enabled = cfg.get('BEAR_ENABLED', True)
@@ -93,9 +93,9 @@ def model_signal_graduated_gentle(model, features_row, feature_cols, config_dict
     cfg = config_dict or {}
     floor = cfg.get('GRADUATED_FLOOR', 0.80)
     hw = cfg.get('GRADUATED_HALF_WIDTH', 0.0025)
-    bull_full_t = cfg.get('DRAWDOWN_BULL_FULL', -0.038)
-    bull_half_t = cfg.get('DRAWDOWN_BULL_HALF', -0.050)
-    ic_t = cfg.get('DRAWDOWN_IRON_CONDOR', -0.065)
+    bull_full_t = cfg.get('DRAWDOWN_BULL_FULL', -0.020)
+    bull_half_t = cfg.get('DRAWDOWN_BULL_HALF', -0.047)
+    ic_t = cfg.get('DRAWDOWN_IRON_CONDOR', -0.076)
 
     def _lerp(val, lo, hi, out_lo, out_hi):
         if hi == lo:
@@ -133,9 +133,9 @@ def model_signal_directional(model, features_row, feature_cols, config_dict=None
     hw = cfg.get('GRADUATED_HALF_WIDTH', 0.0025)
     strong_bull_t = cfg.get('STRONG_BULL_THRESHOLD', -0.005)
     moderate_bull_t = cfg.get('MODERATE_BULL_THRESHOLD', -0.01)
-    bull_full_t = cfg.get('DRAWDOWN_BULL_FULL', -0.038)
-    bull_half_t = cfg.get('DRAWDOWN_BULL_HALF', -0.050)
-    ic_t = cfg.get('DRAWDOWN_IRON_CONDOR', -0.065)
+    bull_full_t = cfg.get('DRAWDOWN_BULL_FULL', -0.020)
+    bull_half_t = cfg.get('DRAWDOWN_BULL_HALF', -0.047)
+    ic_t = cfg.get('DRAWDOWN_IRON_CONDOR', -0.076)
 
     def _lerp(val, lo, hi, out_lo, out_hi):
         if hi == lo:
@@ -176,9 +176,9 @@ def model_signal_directional_bear(model, features_row, feature_cols, config_dict
     cfg = config_dict or {}
     floor = cfg.get('GRADUATED_FLOOR', 0.80)
     hw = cfg.get('GRADUATED_HALF_WIDTH', 0.0025)
-    bull_full_t = cfg.get('DRAWDOWN_BULL_FULL', -0.038)
-    bull_half_t = cfg.get('DRAWDOWN_BULL_HALF', -0.050)
-    ic_t = cfg.get('DRAWDOWN_IRON_CONDOR', -0.065)
+    bull_full_t = cfg.get('DRAWDOWN_BULL_FULL', -0.020)
+    bull_half_t = cfg.get('DRAWDOWN_BULL_HALF', -0.047)
+    ic_t = cfg.get('DRAWDOWN_IRON_CONDOR', -0.076)
     bear_moderate_t = cfg.get('BEAR_MODERATE_THRESHOLD', -0.065)
     bear_strong_t = cfg.get('BEAR_STRONG_THRESHOLD', -0.090)
 

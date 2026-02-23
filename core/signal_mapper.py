@@ -2,20 +2,20 @@
 Maps model prediction to trade signal for each version.
 Replicates signal mapping from the backtest code exactly.
 
-Backtest thresholds (from nifty_options_model/config.py):
-  DRAWDOWN_BULL_FULL  = -0.038  (-3.8%)
-  DRAWDOWN_BULL_HALF  = -0.050  (-5.0%)
-  DRAWDOWN_IRON_CONDOR = -0.065 (-6.5%)
+Optimized thresholds for no-month model (trained 2014-2023):
+  DRAWDOWN_BULL_FULL  = -0.020  (-2.0%)
+  DRAWDOWN_BULL_HALF  = -0.047  (-4.7%)
+  DRAWDOWN_IRON_CONDOR = -0.076 (-7.6%)
 """
 
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Thresholds (as decimals) — aligned with backtest config
-THRESH_BULL_FULL = -0.038   # -3.8%
-THRESH_BULL_HALF = -0.050   # -5.0%
-THRESH_IC = -0.065          # -6.5%
+# Thresholds (as decimals) — optimized for no-month model (trained 2014-2023)
+THRESH_BULL_FULL = -0.020   # -2.0%
+THRESH_BULL_HALF = -0.047   # -4.7%
+THRESH_IC = -0.076          # -7.6%
 
 # In percentage terms (for use in functions that work with %)
 T1_PCT = THRESH_BULL_FULL * 100   # -3.8
@@ -222,39 +222,31 @@ def get_classification_breakdown(pred: float, version: str = None) -> dict:
     from each classification boundary.
     Returns confidence scores for each zone.
 
-    Zone ranges aligned with backtest thresholds:
-      Bull Full:  > -3.8%
-      Bull Half:  -3.8% to -5.0%
-      Iron Condor: -5.0% to -6.5%
-      No Trade:   < -6.5%
+    Zone ranges aligned with optimized thresholds:
+      Bull Full:  > -2.0%
+      Bull Half:  -2.0% to -4.7%
+      Iron Condor: -4.7% to -7.6%
+      No Trade:   < -7.6%
     """
     pred_pct = pred * 100  # e.g., -1.23
 
-    # Base zones (aligned with backtest thresholds)
+    # Base zones (aligned with optimized thresholds)
     zones = [
         {
             "name": "Strong Bull",
-            "range": "0.0% to -1.5%",
+            "range": "0.0% to -1.0%",
             "color": "#00E676",
-            "active": pred_pct > -1.5,
-            "min": -1.5,
+            "active": pred_pct > -1.0,
+            "min": -1.0,
             "max": 0.0,
         },
         {
-            "name": "Moderate Bull",
-            "range": "-1.5% to -2.5%",
-            "color": "#66BB6A",
-            "active": -2.5 < pred_pct <= -1.5,
-            "min": -2.5,
-            "max": -1.5,
-        },
-        {
             "name": "Bull (Full Position)",
-            "range": "-2.5% to -3.8%",
+            "range": f"-1.0% to {T1_PCT}%",
             "color": "#A5D6A7",
-            "active": T1_PCT < pred_pct <= -2.5,
+            "active": T1_PCT < pred_pct <= -1.0,
             "min": T1_PCT,
-            "max": -2.5,
+            "max": -1.0,
         },
         {
             "name": "Bull (Half Position)",
