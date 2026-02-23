@@ -201,18 +201,19 @@ async def run_backfill(db_session) -> dict:
         if pd.isna(spot) or spot <= 0:
             continue
 
-        # Store daily features once
-        daily_feature = DailyFeature(
-            date=trade_date, features=features,
-            vix=vix, vix_20d_avg=vix,
-            nifty_20d_return=features.get("nifty_return_20d"),
-            nifty_50d_return=features.get("nifty_distance_50dma"),
-            iv_skew=features.get("iv_skew_steepness"),
-            fii_net=0, dii_net=0,
-            put_call_ratio=features.get("pcr_proxy"),
-            rsi_14=features.get("rsi_14"), adx_14=0,
-        )
-        db_session.add(daily_feature)
+        # Store daily features once (skip if already exists from forward test)
+        if trade_date < date.fromisoformat(FORWARD_TEST_START):
+            daily_feature = DailyFeature(
+                date=trade_date, features=features,
+                vix=vix, vix_20d_avg=vix,
+                nifty_20d_return=features.get("nifty_return_20d"),
+                nifty_50d_return=features.get("nifty_distance_50dma"),
+                iv_skew=features.get("iv_skew_steepness"),
+                fii_net=0, dii_net=0,
+                put_call_ratio=features.get("pcr_proxy"),
+                rsi_14=features.get("rsi_14"), adx_14=0,
+            )
+            db_session.add(daily_feature)
 
         # Process each version
         for display_ver, profile_name in VERSION_MAP.items():
