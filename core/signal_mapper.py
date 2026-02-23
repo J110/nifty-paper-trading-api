@@ -2,25 +2,25 @@
 Maps model prediction to trade signal for each version.
 Replicates signal mapping from the backtest code exactly.
 
-Optimized thresholds for no-month model (trained 2014-2023):
-  DRAWDOWN_BULL_FULL  = -0.020  (-2.0%)
-  DRAWDOWN_BULL_HALF  = -0.047  (-4.7%)
-  DRAWDOWN_IRON_CONDOR = -0.076 (-7.6%)
+Thresholds (trained 2014-2023):
+  DRAWDOWN_BULL_FULL  = -0.038  (-3.8%)
+  DRAWDOWN_BULL_HALF  = -0.050  (-5.0%)
+  DRAWDOWN_IRON_CONDOR = -0.065 (-6.5%)
 """
 
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Thresholds (as decimals) — optimized for no-month model (trained 2014-2023)
-THRESH_BULL_FULL = -0.020   # -2.0%
-THRESH_BULL_HALF = -0.047   # -4.7%
-THRESH_IC = -0.076          # -7.6%
+# Thresholds (as decimals)
+THRESH_BULL_FULL = -0.038   # -3.8%
+THRESH_BULL_HALF = -0.050   # -5.0%
+THRESH_IC = -0.065          # -6.5%
 
 # In percentage terms (for use in functions that work with %)
-T1_PCT = THRESH_BULL_FULL * 100   # -2.0
-T2_PCT = THRESH_BULL_HALF * 100   # -4.7
-T3_PCT = THRESH_IC * 100          # -7.6
+T1_PCT = THRESH_BULL_FULL * 100   # -3.8
+T2_PCT = THRESH_BULL_HALF * 100   # -5.0
+T3_PCT = THRESH_IC * 100          # -6.5
 
 
 def map_signal_sharp(pred: float) -> dict:
@@ -66,7 +66,7 @@ def map_signal_graduated(pred: float, floor: float = 0.50,
     floor: minimum size multiplier (0.5 = always at least 50% position)
     hw: transition half-width in percentage points (0.5 = ±0.5% transition zone)
 
-    Uses optimized thresholds: -2.0% / -4.7% / -7.6%
+    Uses thresholds: -3.8% / -5.0% / -6.5%
     """
     pred_pct = pred * 100  # -0.012 → -1.2
 
@@ -139,9 +139,9 @@ def map_signal_directional_bear(pred: float, version_cfg: dict) -> dict:
     floor = version_cfg.get("GRADUATED_FLOOR", 0.80)
     hw_pct = version_cfg.get("GRADUATED_HW", 0.25)  # in percentage points
 
-    t1 = THRESH_BULL_FULL   # -0.020
-    t2 = THRESH_BULL_HALF   # -0.047
-    t3 = THRESH_IC          # -0.076
+    t1 = THRESH_BULL_FULL   # -0.038
+    t2 = THRESH_BULL_HALF   # -0.050
+    t3 = THRESH_IC          # -0.065
     hw = hw_pct / 100.0     # convert to decimal
 
     bear_threshold = version_cfg.get("BEAR_DEBIT_THRESHOLD", -0.065)

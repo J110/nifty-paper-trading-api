@@ -92,8 +92,8 @@ async def run_backfill():
         feature_cols = json.load(f)
     logger.info(f"Feature columns: {len(feature_cols)}")
 
-    with open(model_path, 'rb') as f:
-        model = pickle.load(f)
+    import joblib
+    model = joblib.load(model_path)
     logger.info("Model loaded")
 
     pricer = OptionPricer()
@@ -146,7 +146,7 @@ async def run_backfill():
 
             # Confidence score (simple: distance from nearest threshold)
             pred_dd = pred.get('predicted_drawdown', 0)
-            thresholds = [-0.020, -0.047, -0.076]
+            thresholds = [-0.038, -0.050, -0.065]
             confidence = min(abs(pred_dd - t) for t in thresholds) if thresholds else 0.5
 
             await conn.execute("""
@@ -249,6 +249,7 @@ async def run_backfill():
                     position_size_pct, graduated_mult, capital_deployed,
                     exit_date, exit_spot, exit_reason, realized_pnl, exit_time)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+                ON CONFLICT (trade_id) DO NOTHING
             """,
                 trade_id, display_ver, entry_date,
                 trade.signal_type, trade.trade_type, trade.entry_mode or "normal",

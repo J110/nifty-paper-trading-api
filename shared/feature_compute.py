@@ -151,9 +151,7 @@ def load_dhan_options_features(raw_path, skew_path):
     return features
 
 
-# ─── The 26 base feature names (order matters for the model) ───
-# Note: 'month' and 'is_volatile_month' removed — seasonality is captured
-# by VIX/volatility features; month caused systematic bearish bias in Jan/Feb.
+# ─── The 28 base feature names (order matters for the model) ───
 
 BASE_FEATURE_COLS = [
     'nifty_return_5d', 'nifty_return_10d', 'nifty_return_20d',
@@ -165,8 +163,8 @@ BASE_FEATURE_COLS = [
     'sp500_return_5d', 'us_vix', 'us_vix_change_5d',
     'dxy_level', 'dxy_change_5d',
     'us10y_level', 'us10y_change_5d', 'us10y_change_20d',
-    'day_of_month', 'is_expiry_week',
-    'days_to_monthly_expiry',
+    'day_of_month', 'month', 'is_expiry_week',
+    'days_to_monthly_expiry', 'is_volatile_month',
 ]
 
 

@@ -66,11 +66,11 @@ MARGIN_PER_LOT_BULL = 13_750
 MARGIN_PER_LOT_IC = 13_750
 MARGIN_PER_LOT_BEAR = 18_750
 
-# Classification thresholds (shared by all versions) — optimized for no-month model
-DRAWDOWN_BULL_FULL = -0.020     # > -2.0%: bull full
-DRAWDOWN_BULL_HALF = -0.047     # -2.0% to -4.7%: bull half
-DRAWDOWN_IRON_CONDOR = -0.076   # -4.7% to -7.6%: iron condor
-DRAWDOWN_NO_TRADE = -0.076      # < -7.6%: no trade
+# Classification thresholds (shared by all versions)
+DRAWDOWN_BULL_FULL = -0.038     # > -3.8%: bull full
+DRAWDOWN_BULL_HALF = -0.050     # -3.8% to -5.0%: bull half
+DRAWDOWN_IRON_CONDOR = -0.065   # -5.0% to -6.5%: iron condor
+DRAWDOWN_NO_TRADE = -0.065      # < -6.5%: no trade
 
 # VIX filters
 VIX_MIN_ENTRY = 8

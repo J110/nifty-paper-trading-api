@@ -54,7 +54,7 @@ MERGED_DAILY_PATH = os.path.join(BACKEND_ROOT, "data", "merged_daily.parquet")
 DHAN_RAW_PATH = os.path.join(BACKEND_ROOT, "data", "dhan_raw_options.parquet")
 DHAN_SKEW_PATH = os.path.join(BACKEND_ROOT, "data", "daily_iv_skew_params.parquet")
 
-# The 35 training feature names (month/is_volatile_month removed)
+# The 37 training feature names (28 base + 9 Dhan options-derived)
 TRAINING_FEATURES = BASE_FEATURE_COLS + [
     "deep_otm_oi_ratio", "deep_otm_oi_ratio_change_5d",
     "put_oi_buildup_ratio", "put_volume_surge_ratio",
@@ -231,7 +231,7 @@ async def run_backfill(db_session) -> dict:
             pred_dd = signal['predicted_drawdown']
 
             # Confidence
-            thresholds = [-0.020, -0.047, -0.076]
+            thresholds = [-0.038, -0.050, -0.065]
             confidence = min(abs(pred_dd - t) for t in thresholds) if thresholds else 0.5
 
             # Store prediction
