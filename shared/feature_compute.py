@@ -264,7 +264,8 @@ def compute_all_features(df, dhan_features=None, data_start="2014-01-01",
     # ── 5. Calendar ──
     df['day_of_month'] = df.index.day
     df['month'] = df.index.month
-    df['is_volatile_month'] = df['month'].isin([9, 10]).astype(int)
+    # MUST match training data: months 2,3,9,10 were flagged volatile during training
+    df['is_volatile_month'] = df['month'].isin([2, 3, 9, 10]).astype(int)
 
     expiries = _get_monthly_expiries(data_start, data_end)
     trading_dates = df.index
@@ -448,7 +449,8 @@ def compute_features_for_date(merged_daily_df, target_date=None,
     # Calendar
     day_of_month = target_date.day
     month = target_date.month
-    is_volatile_month = 1 if month in [9, 10] else 0
+    # MUST match training data: months 2,3,9,10 were flagged volatile during training
+    is_volatile_month = 1 if month in [2, 3, 9, 10] else 0
 
     # Days to expiry — exact backtest logic (trading days, not calendar).
     # IMPORTANT: use the FULL merged_daily_df index as the trading calendar,

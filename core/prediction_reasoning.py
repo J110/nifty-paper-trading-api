@@ -208,7 +208,7 @@ FEATURE_META = {
         "label": "Volatile Month",
         "fmt": "{}",
         "classify": lambda v: "bearish" if v >= 1 else "neutral",
-        "reason": lambda v, d: "Sep/Oct — historically volatile period" if v >= 1 else "Not in volatile period",
+        "reason": lambda v, d: "Feb/Mar/Sep/Oct — historically volatile period" if v >= 1 else "Not in volatile period",
         "_format_override": lambda v: "Yes" if v >= 1 else "No",
     },
 

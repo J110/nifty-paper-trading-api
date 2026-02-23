@@ -133,16 +133,16 @@ async def run_backfill():
 
             ts_val = datetime.combine(pred_date, datetime.min.time().replace(hour=9, minute=20))
 
-            # Build features dict for storage
+            # Build features dict for storage — include ALL features from feature matrix
+            # so prediction reasoning can display month, is_volatile_month, etc.
             features_dict = {}
-            if merged_daily is not None:
-                ts_key = pd.Timestamp(pred_date)
-                if ts_key in merged_daily.index:
-                    row = merged_daily.loc[ts_key]
-                    features_dict = {
-                        "india_vix": float(row.get("india_vix", 0)),
-                        "nifty_close": float(row.get("nifty_close", 0)),
-                    }
+            ts_key = pd.Timestamp(pred_date)
+            if ts_key in df.index:
+                row = df.loc[ts_key]
+                features_dict = {c: float(row[c]) for c in row.index if not pd.isna(row[c])}
+            # Also add nifty_close from merged_daily if available
+            if merged_daily is not None and ts_key in merged_daily.index:
+                features_dict["nifty_close"] = float(merged_daily.loc[ts_key].get("nifty_close", 0))
 
             # Confidence score (simple: distance from nearest threshold)
             pred_dd = pred.get('predicted_drawdown', 0)
