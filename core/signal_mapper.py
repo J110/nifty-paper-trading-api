@@ -18,9 +18,9 @@ THRESH_BULL_HALF = -0.047   # -4.7%
 THRESH_IC = -0.076          # -7.6%
 
 # In percentage terms (for use in functions that work with %)
-T1_PCT = THRESH_BULL_FULL * 100   # -3.8
-T2_PCT = THRESH_BULL_HALF * 100   # -5.0
-T3_PCT = THRESH_IC * 100          # -6.5
+T1_PCT = THRESH_BULL_FULL * 100   # -2.0
+T2_PCT = THRESH_BULL_HALF * 100   # -4.7
+T3_PCT = THRESH_IC * 100          # -7.6
 
 
 def map_signal_sharp(pred: float) -> dict:
