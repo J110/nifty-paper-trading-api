@@ -113,6 +113,11 @@ def get_config_profile(version):
             'POST_EVENT_FOLLOWUP_ENABLED': True,
             'POST_EVENT_IV_THRESHOLD': 0.03, 'POST_EVENT_IV_LOOKBACK': 20,
             'POST_EVENT_USE_PRE_EVENT_IV': True,
+            # Bear call credit spreads in no_trade zone
+            'BEAR_CALL_ENABLED': True,
+            'BEAR_CALL_OTM_SELL': 0.04, 'BEAR_CALL_OTM_BUY': 0.065,
+            'BEAR_CALL_SIZE_PCT': 0.20, 'BEAR_CALL_MAX_CONCURRENT': 1,
+            'MARGIN_PER_LOT_BEAR_CALL': 13750,
         })
 
     elif version == 'v5.4.3':
@@ -156,6 +161,11 @@ def get_config_profile(version):
             'POST_EVENT_FOLLOWUP_ENABLED': True, 'POST_EVENT_IV_THRESHOLD': 0.04,
             'POST_EVENT_IV_LOOKBACK': 20, 'POST_EVENT_USE_PRE_EVENT_IV': True,
             'SIGNAL_MAPPING': 'graduated',
+            # Bear call credit spreads in no_trade zone
+            'BEAR_CALL_ENABLED': True,
+            'BEAR_CALL_OTM_SELL': 0.045, 'BEAR_CALL_OTM_BUY': 0.07,
+            'BEAR_CALL_SIZE_PCT': 0.20, 'BEAR_CALL_MAX_CONCURRENT': 1,
+            'MARGIN_PER_LOT_BEAR_CALL': 13750,
         })
 
     elif version == 'v5.4.4':
@@ -200,6 +210,11 @@ def get_config_profile(version):
             'TRAILING_STOP_ACTIVATE': 0.45, 'TRAILING_STOP_LEVEL': 0.15,
             'SIGNAL_MAPPING': 'graduated_gentle',
             'GRADUATED_FLOOR': 0.80, 'GRADUATED_HALF_WIDTH': 0.0025,
+            # Bear call credit spreads in no_trade zone
+            'BEAR_CALL_ENABLED': True,
+            'BEAR_CALL_OTM_SELL': 0.04, 'BEAR_CALL_OTM_BUY': 0.065,
+            'BEAR_CALL_SIZE_PCT': 0.20, 'BEAR_CALL_MAX_CONCURRENT': 1,
+            'MARGIN_PER_LOT_BEAR_CALL': 13750,
         })
 
     else:

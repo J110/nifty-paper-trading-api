@@ -135,6 +135,22 @@ def price_bear_put_debit(S: float, buy_strike: float, sell_strike: float,
     return debit
 
 
+def price_bear_call_spread(S: float, sell_strike: float, buy_strike: float,
+                            T: float, r: float, sigma: float,
+                            apply_slippage: bool = False) -> float:
+    """
+    Price a bear call spread (sell call at lower strike, buy call at higher strike).
+    Returns net credit received per share.
+    """
+    sell_call = bs_call_price(S, sell_strike, T, r, sigma)
+    buy_call = bs_call_price(S, buy_strike, T, r, sigma)
+    credit = sell_call - buy_call
+    credit = max(credit, 0)
+    if apply_slippage:
+        credit *= (1 - ENTRY_SLIPPAGE)
+    return credit
+
+
 def compute_spread_value(trade_type: str, S: float,
                          sell_strike: float, buy_strike: float,
                          ic_call_sell: float = None, ic_call_buy: float = None,
@@ -154,6 +170,11 @@ def compute_spread_value(trade_type: str, S: float,
         # For bear debit: buy_strike is the higher strike (bought put)
         # sell_strike is the lower strike (sold put)
         return price_bear_put_debit(S, buy_strike, sell_strike, T, r, sigma)
+    elif trade_type == "bear_call":
+        # Bear call credit: sell_strike=ic_call_sell, buy_strike=ic_call_buy
+        call_sell = ic_call_sell or sell_strike
+        call_buy = ic_call_buy or buy_strike
+        return price_bear_call_spread(S, call_sell, call_buy, T, r, sigma)
     else:
         logger.warning(f"Unknown trade type: {trade_type}")
         return 0.0
@@ -202,6 +223,18 @@ def select_strikes(spot: float, trade_type: str, version_cfg: dict) -> dict:
             "buy_strike": buy_strike,
             "ic_call_sell": None,
             "ic_call_buy": None,
+        }
+    elif trade_type == "bear_call":
+        # Bear call credit: sell OTM call, buy further OTM call
+        call_sell_otm = version_cfg.get("BEAR_CALL_OTM_SELL", version_cfg.get("IC_CALL_OTM_SELL", 0.04))
+        call_buy_otm = version_cfg.get("BEAR_CALL_OTM_BUY", version_cfg.get("IC_CALL_OTM_BUY", 0.065))
+        call_sell = round_strike(spot * (1 + call_sell_otm))
+        call_buy = round_strike(spot * (1 + call_buy_otm))
+        return {
+            "sell_strike": None,
+            "buy_strike": None,
+            "ic_call_sell": call_sell,
+            "ic_call_buy": call_buy,
         }
     else:
         return {

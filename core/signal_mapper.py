@@ -200,20 +200,30 @@ def map_signal(pred: float, version_cfg: dict) -> dict:
     mapping_type = version_cfg.get("SIGNAL_MAPPING", "sharp")
 
     if mapping_type == "sharp":
-        return map_signal_sharp(pred)
+        result = map_signal_sharp(pred)
     elif mapping_type == "graduated":
         floor = version_cfg.get("GRADUATED_FLOOR", 0.50)
         hw = version_cfg.get("GRADUATED_HW", 0.50)
-        return map_signal_graduated(pred, floor=floor, hw=hw)
+        result = map_signal_graduated(pred, floor=floor, hw=hw)
     elif mapping_type == "graduated_gentle":
         floor = version_cfg.get("GRADUATED_FLOOR", 0.80)
         hw = version_cfg.get("GRADUATED_HW", 0.25)
-        return map_signal_graduated(pred, floor=floor, hw=hw)
+        result = map_signal_graduated(pred, floor=floor, hw=hw)
     elif mapping_type == "directional_bear":
         return map_signal_directional_bear(pred, version_cfg)
     else:
         logger.warning(f"Unknown mapping type: {mapping_type}, using sharp")
-        return map_signal_sharp(pred)
+        result = map_signal_sharp(pred)
+
+    # Bear call credit spread: when no_trade and BEAR_CALL_ENABLED, sell call spreads
+    if result["signal"] == "no_trade" and version_cfg.get("BEAR_CALL_ENABLED", False):
+        result = {
+            "signal": "bear_call",
+            "size_mult": 1.0,
+            "trade_type": "bear_call",
+        }
+
+    return result
 
 
 def get_classification_breakdown(pred: float, version: str = None) -> dict:

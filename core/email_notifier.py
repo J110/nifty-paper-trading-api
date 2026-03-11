@@ -24,6 +24,7 @@ def _signal_emoji(signal: str) -> str:
         "bull_full": "\U0001F7E2",      # 🟢
         "bull_half": "\U0001F7E1",      # 🟡
         "iron_condor": "\U0001F7E0",    # 🟠
+        "bear_call": "\U0001F7E3",      # 🟣
         "no_trade": "\U0001F534",       # 🔴
     }.get(signal, "\u26AA")              # ⚪
 
@@ -66,6 +67,13 @@ def _build_trade_html(
             <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{strikes.get('sell_strike', 'N/A')}</td></tr>
         <tr><td style="color:#8b949e;padding:4px 12px;">Buy Put</td>
             <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{strikes.get('buy_strike', 'N/A')}</td></tr>
+        <tr><td style="color:#8b949e;padding:4px 12px;">Sell Call</td>
+            <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{strikes.get('ic_call_sell', 'N/A')}</td></tr>
+        <tr><td style="color:#8b949e;padding:4px 12px;">Buy Call</td>
+            <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{strikes.get('ic_call_buy', 'N/A')}</td></tr>
+        """
+    elif trade_type == "bear_call":
+        strikes_html = f"""
         <tr><td style="color:#8b949e;padding:4px 12px;">Sell Call</td>
             <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{strikes.get('ic_call_sell', 'N/A')}</td></tr>
         <tr><td style="color:#8b949e;padding:4px 12px;">Buy Call</td>

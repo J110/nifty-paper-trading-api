@@ -23,7 +23,7 @@ from config import (
 )
 from core.option_pricer import (
     select_strikes, price_bull_put_spread, price_iron_condor,
-    price_bear_put_debit,
+    price_bear_put_debit, price_bear_call_spread,
     get_next_weekly_expiry, compute_time_to_expiry_years,
     compute_spread_value,
 )
@@ -56,12 +56,16 @@ class TradeManager:
         trade_type = signal["trade_type"]
         size_mult = signal["size_mult"]
         is_bear_debit = (trade_type == "bear_put_debit")
+        is_bear_call = (trade_type == "bear_call")
         bear_tier = signal.get("bear_tier", 0)
 
         # Check concurrent position limits
         if is_bear_debit:
             open_count = await self._count_open_trades(db, version, "bear_put_debit")
             max_concurrent = cfg.get("BEAR_DEBIT_MAX_CONCURRENT", 2)
+        elif is_bear_call:
+            open_count = await self._count_open_trades(db, version, "bear_call")
+            max_concurrent = cfg.get("BEAR_CALL_MAX_CONCURRENT", 1)
         else:
             open_count = await self._count_open_trades(db, version, trade_type)
             max_concurrent = cfg.get("MAX_CONCURRENT_POSITIONS", 3)
@@ -72,8 +76,8 @@ class TradeManager:
             logger.info(f"[{version}] Max concurrent {trade_type} reached ({open_count})")
             return None
 
-        # Check minimum entry gap (only for credit trades)
-        if not is_bear_debit:
+        # Check minimum entry gap (only for bull/IC credit trades, not bear_call)
+        if not is_bear_debit and not is_bear_call:
             min_gap = cfg.get("MIN_ENTRY_GAP_DAYS", 2)
             last_entry = await self._get_last_entry_date(db, version)
             if last_entry and (today_ist() - last_entry).days < min_gap:
@@ -90,6 +94,8 @@ class TradeManager:
             "IC_CALL_OTM_BUY": cfg.get("IC_CALL_OTM_BUY", 0.065),
             "BEAR_PUT_BUY_OTM": cfg.get("BEAR_PUT_BUY_OTM", 0.01),
             "BEAR_PUT_SELL_OTM": cfg.get("BEAR_PUT_SELL_OTM", 0.04),
+            "BEAR_CALL_OTM_SELL": cfg.get("BEAR_CALL_OTM_SELL", 0.04),
+            "BEAR_CALL_OTM_BUY": cfg.get("BEAR_CALL_OTM_BUY", 0.065),
         }
         strikes = select_strikes(spot, trade_type, strike_cfg)
 
@@ -127,7 +133,7 @@ class TradeManager:
             total_credit = 0.0
             entry_mode = "bear_debit"
         else:
-            # Credit trades (bull_put, iron_condor)
+            # Credit trades (bull_put, iron_condor, bear_call)
             debit = 0.0
             if trade_type == "bull_put":
                 credit = price_bull_put_spread(
@@ -140,12 +146,19 @@ class TradeManager:
                     strikes["ic_call_sell"], strikes["ic_call_buy"],
                     T, RISK_FREE_RATE, sigma, apply_slippage=True
                 )
+            elif trade_type == "bear_call":
+                credit = price_bear_call_spread(
+                    spot, strikes["ic_call_sell"], strikes["ic_call_buy"],
+                    T, RISK_FREE_RATE, sigma, apply_slippage=True
+                )
             else:
                 credit = 0
 
             position_size_pct = cfg.get("POSITION_SIZE_PCT", 0.20)
             if trade_type == "iron_condor":
                 position_size_pct = cfg.get("IC_POSITION_SIZE_PCT", 0.15)
+            elif trade_type == "bear_call":
+                position_size_pct = cfg.get("BEAR_CALL_SIZE_PCT", 0.20)
 
             effective_size_pct = position_size_pct * size_mult
             margin_per_lot = MARGIN_PER_LOT_BULL if trade_type == "bull_put" else MARGIN_PER_LOT_IC
