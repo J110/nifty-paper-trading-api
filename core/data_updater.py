@@ -115,6 +115,10 @@ def _download_yahoo(symbol: str, name: str, start_date: str, end_date: str):
         # Drop rows where Close is None/NaN
         df = df.dropna(subset=["Close"])
 
+        # Remove duplicate dates (can happen when Yahoo returns multiple
+        # timestamps that normalise to the same calendar date, e.g. DST)
+        df = df[~df.index.duplicated(keep="last")]
+
         if df.empty:
             logger.warning(f"No valid data for {name} ({symbol}) after dropna")
             return None
