@@ -15,7 +15,7 @@ from api.signals import router as signals_router
 from api.trades import router as trades_router
 from api.charts import router as charts_router
 from api.returns import router as returns_router
-from scheduler.jobs import setup_scheduler, check_and_recover_missed_prediction
+from scheduler.jobs import setup_scheduler, check_and_recover_missed_prediction, run_data_update
 
 # Configure logging
 logging.basicConfig(
@@ -46,16 +46,21 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info("APScheduler started")
 
-    # Check if we missed today's prediction (server restart recovery)
-    # Delay recovery by 30s so the server binds to port first
-    # (Render free tier times out if port isn't open quickly)
+    # On every startup: refresh parquet data immediately, then check
+    # for missed predictions. This is critical because Render's ephemeral
+    # filesystem resets the parquet to the git version on each deploy,
+    # and the Dhan token requires daily redeployment.
     import asyncio
 
-    async def _delayed_recovery():
+    async def _startup_data_refresh():
+        # Wait for port binding first (Render times out if port isn't open quickly)
         await asyncio.sleep(30)
+        # Always update parquet on startup — regardless of time/day
+        await run_data_update()
+        # Then check if predictions were missed
         await check_and_recover_missed_prediction()
 
-    asyncio.create_task(_delayed_recovery())
+    asyncio.create_task(_startup_data_refresh())
 
     yield
 
