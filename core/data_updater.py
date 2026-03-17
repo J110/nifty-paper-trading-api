@@ -43,7 +43,10 @@ TICKERS = {
     "us10y": {"symbol": "^TNX", "col": "us10y_yield"},
 }
 
-YAHOO_API_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+YAHOO_API_HOSTS = [
+    "query2.finance.yahoo.com",
+    "query1.finance.yahoo.com",
+]
 YAHOO_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -56,81 +59,91 @@ YAHOO_HEADERS = {
 def _download_yahoo(symbol: str, name: str, start_date: str, end_date: str):
     """
     Download OHLCV data directly from Yahoo Finance v8 API.
+    Tries query2 first (more reliable), then falls back to query1.
     Returns a DataFrame with DatetimeIndex and columns: Open, High, Low, Close, Volume.
     Returns None if the download fails.
     """
-    try:
-        # Convert dates to unix timestamps
-        start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
-        end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp())
+    # Convert dates to unix timestamps
+    start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
+    end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp())
 
-        url = YAHOO_API_URL.format(symbol=symbol)
-        params = {
-            "period1": start_ts,
-            "period2": end_ts,
-            "interval": "1d",
-            "events": "history",
-        }
+    params = {
+        "period1": start_ts,
+        "period2": end_ts,
+        "interval": "1d",
+        "events": "history",
+    }
 
-        logger.info(f"Downloading {name} ({symbol}) from {start_date} to {end_date}")
+    logger.info(f"Downloading {name} ({symbol}) from {start_date} to {end_date}")
 
-        resp = httpx.get(url, params=params, headers=YAHOO_HEADERS,
-                         timeout=30.0, follow_redirects=True)
-        resp.raise_for_status()
-        data = resp.json()
+    last_error = None
+    for host in YAHOO_API_HOSTS:
+        url = f"https://{host}/v8/finance/chart/{symbol}"
+        try:
+            resp = httpx.get(url, params=params, headers=YAHOO_HEADERS,
+                             timeout=30.0, follow_redirects=True)
+            resp.raise_for_status()
+            data = resp.json()
 
-        chart = data.get("chart", {})
-        error = chart.get("error")
-        if error:
-            logger.warning(f"Yahoo API error for {name}: {error}")
-            return None
+            chart = data.get("chart", {})
+            error = chart.get("error")
+            if error:
+                logger.warning(f"Yahoo API error for {name} via {host}: {error}")
+                last_error = error
+                continue
 
-        results = chart.get("result", [])
-        if not results:
-            logger.warning(f"No results for {name} ({symbol})")
-            return None
+            results = chart.get("result", [])
+            if not results:
+                logger.warning(f"No results for {name} ({symbol}) via {host}")
+                last_error = "no results"
+                continue
 
-        result = results[0]
-        timestamps = result.get("timestamp")
-        if not timestamps:
-            logger.warning(f"No timestamps for {name} ({symbol})")
-            return None
+            result = results[0]
+            timestamps = result.get("timestamp")
+            if not timestamps:
+                logger.warning(f"No timestamps for {name} ({symbol}) via {host}")
+                last_error = "no timestamps"
+                continue
 
-        quotes = result["indicators"]["quote"][0]
+            quotes = result["indicators"]["quote"][0]
 
-        # Build DataFrame
-        dates = pd.to_datetime([datetime.utcfromtimestamp(ts) for ts in timestamps])
-        dates = dates.normalize()  # strip time component
+            # Build DataFrame
+            dates = pd.to_datetime([datetime.utcfromtimestamp(ts) for ts in timestamps])
+            dates = dates.normalize()  # strip time component
 
-        df = pd.DataFrame({
-            "Open": quotes.get("open"),
-            "High": quotes.get("high"),
-            "Low": quotes.get("low"),
-            "Close": quotes.get("close"),
-            "Volume": quotes.get("volume"),
-        }, index=dates)
+            df = pd.DataFrame({
+                "Open": quotes.get("open"),
+                "High": quotes.get("high"),
+                "Low": quotes.get("low"),
+                "Close": quotes.get("close"),
+                "Volume": quotes.get("volume"),
+            }, index=dates)
 
-        df.index.name = "Date"
+            df.index.name = "Date"
 
-        # Drop rows where Close is None/NaN
-        df = df.dropna(subset=["Close"])
+            # Drop rows where Close is None/NaN
+            df = df.dropna(subset=["Close"])
 
-        # Remove duplicate dates (can happen when Yahoo returns multiple
-        # timestamps that normalise to the same calendar date, e.g. DST)
-        df = df[~df.index.duplicated(keep="last")]
+            # Remove duplicate dates (can happen when Yahoo returns multiple
+            # timestamps that normalise to the same calendar date, e.g. DST)
+            df = df[~df.index.duplicated(keep="last")]
 
-        if df.empty:
-            logger.warning(f"No valid data for {name} ({symbol}) after dropna")
-            return None
+            if df.empty:
+                logger.warning(f"No valid data for {name} ({symbol}) after dropna via {host}")
+                last_error = "empty after dropna"
+                continue
 
-        logger.info(f"Downloaded {name}: {len(df)} rows, "
-                    f"{df.index[0].date()} to {df.index[-1].date()}")
-        return df
+            logger.info(f"Downloaded {name}: {len(df)} rows, "
+                        f"{df.index[0].date()} to {df.index[-1].date()} (via {host})")
+            return df
 
-    except Exception as e:
-        logger.warning(f"Failed to download {name} ({symbol}): {e}",
-                       exc_info=True)
-        return None
+        except Exception as e:
+            logger.warning(f"Failed to download {name} ({symbol}) via {host}: {e}")
+            last_error = e
+            continue
+
+    logger.warning(f"All Yahoo hosts failed for {name} ({symbol}): {last_error}")
+    return None
 
 
 async def update_merged_daily() -> dict:
@@ -225,9 +238,13 @@ async def update_merged_daily() -> dict:
         new_rows = new_data.loc[new_dates].copy()
 
         # Forward-fill from existing data for any columns that are NaN
-        # (e.g., if India VIX wasn't available today, use last known value)
+        # or entirely missing (e.g., if DXY API returned 500)
         for col in existing.columns:
-            if col in new_rows.columns:
+            if col not in new_rows.columns:
+                # Column completely missing — fill with last known value
+                new_rows[col] = existing[col].iloc[-1]
+                logger.warning(f"Column '{col}' missing from new data — forward-filled from existing")
+            else:
                 mask = new_rows[col].isna()
                 if mask.any():
                     last_val = existing[col].iloc[-1]
