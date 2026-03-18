@@ -11,8 +11,8 @@ load_dotenv()
 # ============================================================
 # Environment
 # ============================================================
-# Neon PostgreSQL (free tier) — set DATABASE_URL in Render env vars
-# Format: postgresql+asyncpg://user:pass@ep-xxx.region.aws.neon.tech/nifty_paper?sslmode=require
+# Supabase PostgreSQL (free tier) — set DATABASE_URL in Render env vars
+# Format: postgresql+asyncpg://user:pass@host.pooler.supabase.com:5432/postgres
 _raw_db_url = os.environ.get("DATABASE_URL", "")
 
 # Render sets postgres:// but SQLAlchemy needs postgresql+asyncpg://

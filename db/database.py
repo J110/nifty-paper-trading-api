@@ -1,6 +1,6 @@
 """
 Async database engine, session factory, and helpers for FastAPI.
-Uses Neon PostgreSQL (serverless, free tier) with SSL.
+Uses Supabase PostgreSQL (free tier) with SSL.
 """
 
 import ssl
@@ -9,7 +9,7 @@ from typing import AsyncGenerator
 
 from config import DATABASE_URL
 
-# Neon requires SSL — create SSL context for asyncpg
+# Supabase requires SSL — create SSL context for asyncpg
 ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE
@@ -21,7 +21,7 @@ engine = create_async_engine(
     connect_args={"ssl": ssl_context},
     pool_size=5,
     max_overflow=10,
-    pool_pre_ping=True,  # handles Neon cold starts gracefully
+    pool_pre_ping=True,  # handles connection drops gracefully
 )
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
