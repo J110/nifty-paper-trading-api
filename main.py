@@ -726,3 +726,34 @@ async def debug_delete_trade(trade_id: str):
     except Exception as e:
         logger.error(f"Delete trade failed for {trade_id}: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/debug/export-table/{table_name}")
+async def debug_export_table(table_name: str, offset: int = 0, limit: int = 500):
+    """Export raw table data as JSON for migration. Temporary endpoint."""
+    from db.database import async_session_factory
+    from sqlalchemy import text
+
+    allowed = ["predictions", "trades", "delay_prices", "price_snapshots", "daily_features", "daily_pnl"]
+    if table_name not in allowed:
+        return {"error": f"Table must be one of: {allowed}"}
+
+    try:
+        async with async_session_factory() as db:
+            result = await db.execute(
+                text(f"SELECT * FROM {table_name} ORDER BY id LIMIT :limit OFFSET :offset"),
+                {"limit": limit, "offset": offset},
+            )
+            rows = result.mappings().all()
+            import json
+            from datetime import date, datetime
+
+            def serialize(obj):
+                if isinstance(obj, (date, datetime)):
+                    return obj.isoformat()
+                return obj
+
+            data = [{k: serialize(v) for k, v in dict(row).items()} for row in rows]
+            return {"table": table_name, "offset": offset, "limit": limit, "count": len(data), "rows": data}
+    except Exception as e:
+        return {"error": str(e)}
