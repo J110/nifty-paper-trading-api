@@ -503,6 +503,18 @@ async def recalculate_forward_test():
 
     logger.info("=== Starting forward test recalculation ===")
 
+    # Ensure new column exists (added in this deploy)
+    try:
+        async with async_session_factory() as migrate_db:
+            from sqlalchemy import text as _text
+            await migrate_db.execute(_text(
+                "ALTER TABLE trades ADD COLUMN IF NOT EXISTS stop_loss_last_breach_date DATE"
+            ))
+            await migrate_db.commit()
+            logger.info("Ensured stop_loss_last_breach_date column exists")
+    except Exception as e:
+        logger.warning(f"Column migration note: {e}")
+
     try:
         async with async_session_factory() as db:
             # 1. Load all forward test predictions from DB
