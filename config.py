@@ -124,34 +124,33 @@ VERSION_CONFIGS = {
     },
 
     "v5.4.3": {
-        "label": "Robust Variant",
+        "label": "Sharp Threshold (5-min exits)",
         "color": "#E8833A",  # orange
 
-        # Sizing (smaller = less concentrated)
-        "POSITION_SIZE_PCT": 0.15,
-        "IC_POSITION_SIZE_PCT": 0.15,
+        # Clone of v5.4.2 config, but all exit checks run every 5 min (no hybrid)
+        # Sizing
+        "POSITION_SIZE_PCT": 0.20,
+        "IC_POSITION_SIZE_PCT": 0.20,
         "MAX_CONCURRENT_POSITIONS": 3,
-        "IC_MAX_CONCURRENT": 2,
-        "MIN_ENTRY_GAP_DAYS": 3,
+        "IC_MAX_CONCURRENT": 3,
+        "MIN_ENTRY_GAP_DAYS": 2,
 
-        # Exits (tighter)
-        "PROFIT_TARGET_EARLY": 0.45,
-        "PROFIT_TARGET_MID": 0.60,
-        "PROFIT_TARGET_LATE": 0.75,
-        "STOP_LOSS_MULTIPLIER": 2.5,
-        "STOP_LOSS_CONFIRM_DAYS": 1,
-        "IC_STOP_LOSS_MULTIPLIER": 2.5,
-        "IC_STOP_LOSS_CONFIRM_DAYS": 1,
-        "TRAILING_STOP_ACTIVATE": 0.45,
-        "TRAILING_STOP_LEVEL": 0.15,
+        # Exits (same as v5.4.2)
+        "PROFIT_TARGET_EARLY": 0.50,
+        "PROFIT_TARGET_MID": 0.65,
+        "PROFIT_TARGET_LATE": 0.80,
+        "STOP_LOSS_MULTIPLIER": 3.0,
+        "STOP_LOSS_CONFIRM_DAYS": 2,
+        "IC_STOP_LOSS_MULTIPLIER": 3.0,
+        "IC_STOP_LOSS_CONFIRM_DAYS": 2,
+        "TRAILING_STOP_ACTIVATE": 0.40,
+        "TRAILING_STOP_LEVEL": 0.10,
         "MIN_DTE_EXIT": 1,
 
-        # Signal mapping type
-        "SIGNAL_MAPPING": "graduated",  # 0.5x floor, ±0.5% transitions
-        "GRADUATED_FLOOR": 0.50,
-        "GRADUATED_HW": 0.50,
+        # Signal mapping type (same as v5.4.2)
+        "SIGNAL_MAPPING": "sharp",
 
-        # Advanced features (same as v5.4.2 with minor differences)
+        # Advanced features (same as v5.4.2)
         "IC_CALL_OTM_SELL": 0.04,
         "IC_CALL_OTM_BUY": 0.065,
         "OI_WALL_ENABLED": True,

@@ -523,10 +523,10 @@ async def check_all_exits():
 
         async with async_session_factory() as db:
             for version in ACTIVE_VERSIONS:
-                # v5.4.2 hybrid: only loss checks (stop loss + expiry) intraday;
+                # v5.4.2/v5.4.4 hybrid: only loss checks (stop loss + expiry) intraday;
                 # profit target + trailing stop checked at EOD.
-                # v5.4.3/v5.4.4: full checks every 5 minutes.
-                loss_only = (version == "v5.4.2")
+                # v5.4.3: full checks every 5 minutes.
+                loss_only = (version in ("v5.4.2", "v5.4.4"))
                 closed_trades = await trade_manager.check_exits(
                     version, spot, vix, db, loss_only=loss_only
                 )
