@@ -1141,11 +1141,11 @@ async def debug_delete_trade(trade_id: str):
 @app.post("/api/debug/clone-v542-to-v543")
 async def clone_v542_to_v543():
     """
-    Clone all v5.4.2 forward test data into v5.4.3.
+    Clone ALL v5.4.2 data (backtest + forward test) into v5.4.3.
 
-    Deletes all existing v5.4.3 forward test trades, daily_pnl, delay_prices,
-    and predictions. Then copies v5.4.2 forward test data into v5.4.3 with
-    updated version and trade_id fields.
+    Deletes all existing v5.4.3 trades, daily_pnl, delay_prices,
+    and predictions. Then copies everything from v5.4.2 into v5.4.3
+    with updated version and trade_id fields.
 
     This makes v5.4.3 identical to v5.4.2 so they can diverge only based
     on exit frequency going forward (v5.4.2 = hybrid, v5.4.3 = all 5-min).
@@ -1155,49 +1155,39 @@ async def clone_v542_to_v543():
     from db.database import async_session_factory
     from db.models import Trade, DailyPnl, DelayPrice, Prediction
 
-    FORWARD_TEST_START = date_cls(2026, 2, 13)
-
     try:
         async with async_session_factory() as db:
-            # ── Step 1: Delete all v5.4.3 forward test data ──
+            # ── Step 1: Delete ALL v5.4.3 data ──
 
-            # Get v5.4.3 forward test trade_ids (for delay_prices FK)
+            # Get all v5.4.3 trade_ids (for delay_prices FK)
             result = await db.execute(
-                select(Trade.trade_id).where(
-                    Trade.version == "v5.4.3",
-                    Trade.entry_date >= FORWARD_TEST_START,
-                )
+                select(Trade.trade_id).where(Trade.version == "v5.4.3")
             )
             old_trade_ids = [r[0] for r in result.all()]
 
             # Delete delay_prices for those trades
             if old_trade_ids:
-                await db.execute(
-                    delete(DelayPrice).where(DelayPrice.trade_id.in_(old_trade_ids))
-                )
+                # Delete in batches to avoid too-long IN clause
+                batch_size = 500
+                for i in range(0, len(old_trade_ids), batch_size):
+                    batch = old_trade_ids[i:i + batch_size]
+                    await db.execute(
+                        delete(DelayPrice).where(DelayPrice.trade_id.in_(batch))
+                    )
 
-            # Delete v5.4.3 forward test trades
+            # Delete all v5.4.3 trades
             del_trades = await db.execute(
-                delete(Trade).where(
-                    Trade.version == "v5.4.3",
-                    Trade.entry_date >= FORWARD_TEST_START,
-                )
+                delete(Trade).where(Trade.version == "v5.4.3")
             )
 
-            # Delete v5.4.3 forward test daily_pnl
+            # Delete all v5.4.3 daily_pnl
             del_pnl = await db.execute(
-                delete(DailyPnl).where(
-                    DailyPnl.version == "v5.4.3",
-                    DailyPnl.date >= FORWARD_TEST_START,
-                )
+                delete(DailyPnl).where(DailyPnl.version == "v5.4.3")
             )
 
-            # Delete v5.4.3 forward test predictions
+            # Delete all v5.4.3 predictions
             del_preds = await db.execute(
-                delete(Prediction).where(
-                    Prediction.version == "v5.4.3",
-                    Prediction.date >= FORWARD_TEST_START,
-                )
+                delete(Prediction).where(Prediction.version == "v5.4.3")
             )
 
             deleted_summary = {
@@ -1207,12 +1197,11 @@ async def clone_v542_to_v543():
                 "delay_prices": len(old_trade_ids),
             }
 
-            # ── Step 2: Load v5.4.2 forward test data ──
+            # ── Step 2: Load ALL v5.4.2 data ──
 
             result = await db.execute(
                 select(Trade).where(
                     Trade.version == "v5.4.2",
-                    Trade.entry_date >= FORWARD_TEST_START,
                 ).order_by(Trade.entry_date)
             )
             v542_trades = result.scalars().all()
@@ -1220,7 +1209,6 @@ async def clone_v542_to_v543():
             result = await db.execute(
                 select(DailyPnl).where(
                     DailyPnl.version == "v5.4.2",
-                    DailyPnl.date >= FORWARD_TEST_START,
                 ).order_by(DailyPnl.date)
             )
             v542_pnl = result.scalars().all()
@@ -1228,7 +1216,6 @@ async def clone_v542_to_v543():
             result = await db.execute(
                 select(Prediction).where(
                     Prediction.version == "v5.4.2",
-                    Prediction.date >= FORWARD_TEST_START,
                 ).order_by(Prediction.date)
             )
             v542_preds = result.scalars().all()
