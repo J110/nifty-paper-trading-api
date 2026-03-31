@@ -115,8 +115,7 @@ class TradeManager:
             # Compute lots
             position_size_pct = cfg.get("POSITION_SIZE_PCT", 0.20)
             effective_size_pct = position_size_pct * size_mult
-            current_capital = await self._get_current_capital(db, version)
-            max_capital = current_capital * effective_size_pct
+            max_capital = INITIAL_CAPITAL * effective_size_pct
             num_lots = max(1, int(max_capital / MARGIN_PER_LOT_BEAR))
             num_lots = min(num_lots, 3)  # cap at 3 lots for bear debits
 
@@ -163,8 +162,7 @@ class TradeManager:
             effective_size_pct = position_size_pct * size_mult
             margin_per_lot = MARGIN_PER_LOT_BULL if trade_type == "bull_put" else MARGIN_PER_LOT_IC
 
-            current_capital = await self._get_current_capital(db, version)
-            max_capital = current_capital * effective_size_pct
+            max_capital = INITIAL_CAPITAL * effective_size_pct
             num_lots = max(1, int(max_capital / margin_per_lot))
 
             total_credit = credit * num_lots * NIFTY_LOT_SIZE
@@ -357,13 +355,17 @@ class TradeManager:
 
         max_loss = trade.credit_received * sl_mult
         if current_value >= max_loss + trade.credit_received:
-            # Breach detected — increment counter
-            trade.stop_loss_breach_days = (trade.stop_loss_breach_days or 0) + 1
+            # Breach detected — only increment once per calendar day
+            last_breach = trade.stop_loss_last_breach_date
+            if last_breach != today:
+                trade.stop_loss_breach_days = (trade.stop_loss_breach_days or 0) + 1
+                trade.stop_loss_last_breach_date = today
             if trade.stop_loss_breach_days >= confirm_days:
                 return "stop_loss"
         else:
             # Recovery — reset breach counter
             trade.stop_loss_breach_days = 0
+            trade.stop_loss_last_breach_date = None
 
         return None
 

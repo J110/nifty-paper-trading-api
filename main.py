@@ -470,6 +470,404 @@ async def run_backfill_endpoint():
         }
 
 
+@app.post("/api/debug/recalculate-forward-test")
+async def recalculate_forward_test():
+    """
+    Recalculate all forward test trades (entry_date >= 2026-02-13) with:
+    1. INITIAL_CAPITAL for position sizing (no compounding)
+    2. Per-calendar-day stop loss breach tracking
+
+    Preserves backtest trades. Uses stored predictions for signals,
+    merged_daily.parquet close prices for exit evaluation.
+    """
+    import traceback
+    import math
+    import numpy as np
+    import pandas as pd
+    from datetime import date as date_cls, datetime, timedelta
+    from sqlalchemy import text, select, delete, update
+    from db.database import async_session_factory
+    from db.models import Trade, DailyPnl, DelayPrice, Prediction
+    from core.signal_mapper import map_signal
+    from core.option_pricer import (
+        select_strikes, price_bull_put_spread, price_iron_condor,
+        compute_spread_value, get_next_weekly_expiry,
+    )
+    from config import (
+        ACTIVE_VERSIONS, VERSION_CONFIGS, INITIAL_CAPITAL, NIFTY_LOT_SIZE,
+        RISK_FREE_RATE, MARGIN_PER_LOT_BULL, MARGIN_PER_LOT_IC,
+        BULL_OTM_SELL, BULL_OTM_BUY,
+    )
+
+    FORWARD_TEST_START = date_cls(2026, 2, 13)
+
+    logger.info("=== Starting forward test recalculation ===")
+
+    try:
+        async with async_session_factory() as db:
+            # 1. Load all forward test predictions from DB
+            result = await db.execute(
+                select(Prediction).where(
+                    Prediction.date >= FORWARD_TEST_START
+                ).order_by(Prediction.date, Prediction.version)
+            )
+            all_predictions = result.scalars().all()
+
+            # Build per-date prediction data (use first version's spot/vix)
+            pred_by_date = {}
+            pred_by_date_version = {}
+            for p in all_predictions:
+                if p.date not in pred_by_date:
+                    pred_by_date[p.date] = {
+                        "spot": p.nifty_spot,
+                        "vix": p.vix,
+                        "predicted_drawdown": p.predicted_drawdown,
+                    }
+                pred_by_date_version[(p.date, p.version)] = p
+
+            logger.info(f"Loaded {len(all_predictions)} predictions for {len(pred_by_date)} dates")
+
+            # 2. Load merged_daily.parquet for daily close prices (exit evaluation)
+            parquet_path = "/app/data/merged_daily.parquet"
+            import os
+            if not os.path.exists(parquet_path):
+                # Try local path
+                local_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "data", "merged_daily.parquet"
+                )
+                if os.path.exists(local_path):
+                    parquet_path = local_path
+                else:
+                    return {"status": "error", "message": f"merged_daily.parquet not found"}
+
+            merged_daily = pd.read_parquet(parquet_path)
+            logger.info(f"Loaded merged_daily: {len(merged_daily)} rows, last={merged_daily.index[-1].date()}")
+
+            # Build close price lookup from parquet
+            close_prices = {}
+            for ts in merged_daily.index:
+                d = ts.date()
+                if d >= FORWARD_TEST_START:
+                    close_val = merged_daily.loc[ts, "nifty_close"]
+                    vix_val = merged_daily.loc[ts].get("india_vix", 15.0)
+                    if not pd.isna(close_val) and close_val > 0:
+                        close_prices[d] = {
+                            "spot": float(close_val),
+                            "vix": float(vix_val) if not pd.isna(vix_val) else 15.0,
+                        }
+
+            # Merge prediction spots into close_prices (prefer live Dhan spot for entry days)
+            for d, data in pred_by_date.items():
+                if data["spot"] and data["spot"] > 0:
+                    close_prices[d] = {
+                        "spot": data["spot"],
+                        "vix": data["vix"] if data["vix"] else close_prices.get(d, {}).get("vix", 15.0),
+                    }
+
+            all_dates = sorted(close_prices.keys())
+            logger.info(f"Trading dates for simulation: {len(all_dates)} ({all_dates[0]} to {all_dates[-1]})")
+
+            # 3. Delete all forward test trades, daily_pnl, delay_prices
+            # First get trade_ids for delay_prices cleanup
+            fwd_trades_result = await db.execute(
+                select(Trade.trade_id).where(Trade.entry_date >= FORWARD_TEST_START)
+            )
+            fwd_trade_ids = [r[0] for r in fwd_trades_result.fetchall()]
+
+            if fwd_trade_ids:
+                await db.execute(
+                    delete(DelayPrice).where(DelayPrice.trade_id.in_(fwd_trade_ids))
+                )
+            await db.execute(
+                delete(Trade).where(Trade.entry_date >= FORWARD_TEST_START)
+            )
+            await db.execute(
+                delete(DailyPnl).where(DailyPnl.date >= FORWARD_TEST_START)
+            )
+            await db.commit()
+            logger.info(f"Deleted {len(fwd_trade_ids)} forward test trades + related data")
+
+            # 4. Re-simulate trades
+            stats = {"trades_opened": 0, "trades_closed": 0, "days_processed": 0}
+
+            # Per-version state
+            version_state = {}
+            for v in ACTIVE_VERSIONS:
+                version_state[v] = {
+                    "open_trades": [],
+                    "cumulative_pnl": 0.0,
+                }
+
+            for trade_date in all_dates:
+                day_data = close_prices[trade_date]
+                spot = day_data["spot"]
+                vix = day_data["vix"]
+
+                if spot <= 0:
+                    continue
+
+                for version in ACTIVE_VERSIONS:
+                    cfg = VERSION_CONFIGS[version]
+                    state = version_state[version]
+
+                    # --- CHECK EXITS ---
+                    trades_to_close = []
+                    for ot in state["open_trades"]:
+                        dte = (ot["expiry"] - trade_date).days
+                        T = max(dte / 365.0, 1 / 365.0)
+                        sigma = vix / 100.0 if vix > 0 else 0.15
+
+                        current_value = compute_spread_value(
+                            ot["trade_type"], spot,
+                            ot["sell_strike"], ot["buy_strike"],
+                            ot.get("ic_call_sell"), ot.get("ic_call_buy"),
+                            T, RISK_FREE_RATE, sigma
+                        )
+
+                        pnl_per_unit = ot["credit"] - current_value
+                        pnl_pct = pnl_per_unit / ot["credit"] if ot["credit"] > 0 else 0
+
+                        exit_reason = None
+
+                        # 1. Expiry
+                        if dte <= cfg.get("MIN_DTE_EXIT", 1):
+                            exit_reason = "expiry"
+
+                        # 2. Profit target
+                        if not exit_reason:
+                            days_held = (trade_date - ot["entry_date"]).days
+                            if days_held <= 3:
+                                pt = cfg.get("PROFIT_TARGET_EARLY", 0.50)
+                            elif days_held <= 7:
+                                pt = cfg.get("PROFIT_TARGET_MID", 0.65)
+                            else:
+                                pt = cfg.get("PROFIT_TARGET_LATE", 0.80)
+                            if pnl_pct >= pt:
+                                exit_reason = "profit_target"
+
+                        # 3. Trailing stop
+                        if not exit_reason:
+                            ta = cfg.get("TRAILING_STOP_ACTIVATE", 0.40)
+                            tl = cfg.get("TRAILING_STOP_LEVEL", 0.10)
+                            if pnl_pct >= ta:
+                                peak = ot.get("peak_pnl_pct", 0.0)
+                                if peak > 0 and pnl_pct < peak - tl:
+                                    exit_reason = "trailing_stop"
+                                ot["peak_pnl_pct"] = max(peak, pnl_pct)
+
+                        # 4. Stop loss — per-CALENDAR-DAY breach tracking
+                        if not exit_reason:
+                            sl_mult = cfg.get("IC_STOP_LOSS_MULTIPLIER", 3.0) if ot["trade_type"] == "iron_condor" else cfg.get("STOP_LOSS_MULTIPLIER", 3.0)
+                            cd = cfg.get("IC_STOP_LOSS_CONFIRM_DAYS", 1) if ot["trade_type"] == "iron_condor" else cfg.get("STOP_LOSS_CONFIRM_DAYS", 1)
+
+                            if current_value >= ot["credit"] * sl_mult + ot["credit"]:
+                                last_breach = ot.get("stop_loss_last_breach_date")
+                                if last_breach != trade_date:
+                                    ot["stop_loss_breach_days"] = ot.get("stop_loss_breach_days", 0) + 1
+                                    ot["stop_loss_last_breach_date"] = trade_date
+                                if ot["stop_loss_breach_days"] >= cd:
+                                    exit_reason = "stop_loss"
+                            else:
+                                ot["stop_loss_breach_days"] = 0
+                                ot["stop_loss_last_breach_date"] = None
+
+                        if exit_reason:
+                            realized_pnl = pnl_per_unit * ot["num_lots"] * NIFTY_LOT_SIZE
+                            rpnl_pct = realized_pnl / ot["capital_deployed"] * 100 if ot["capital_deployed"] > 0 else 0
+
+                            await db.execute(
+                                update(Trade).where(Trade.trade_id == ot["trade_id"]).values(
+                                    status="closed",
+                                    exit_date=trade_date,
+                                    exit_time=datetime.combine(trade_date, datetime.min.time().replace(hour=15, minute=25)),
+                                    exit_spot=spot,
+                                    exit_reason=exit_reason,
+                                    realized_pnl=realized_pnl,
+                                    current_pnl=realized_pnl,
+                                    current_pnl_pct=rpnl_pct,
+                                    current_spread_value=current_value,
+                                    unrealized_pnl=0,
+                                )
+                            )
+                            state["cumulative_pnl"] += realized_pnl
+                            trades_to_close.append(ot["trade_id"])
+                            stats["trades_closed"] += 1
+                        else:
+                            # Update unrealized PnL
+                            unrealized_pnl = pnl_per_unit * ot["num_lots"] * NIFTY_LOT_SIZE
+                            await db.execute(
+                                update(Trade).where(Trade.trade_id == ot["trade_id"]).values(
+                                    current_spread_value=current_value,
+                                    unrealized_pnl=unrealized_pnl,
+                                    current_pnl=unrealized_pnl,
+                                    current_pnl_pct=unrealized_pnl / ot["capital_deployed"] * 100 if ot["capital_deployed"] > 0 else 0,
+                                )
+                            )
+
+                    state["open_trades"] = [t for t in state["open_trades"] if t["trade_id"] not in trades_to_close]
+
+                    # --- OPEN NEW TRADE ---
+                    pred = pred_by_date_version.get((trade_date, version))
+                    if pred:
+                        signal = map_signal(pred.predicted_drawdown, cfg)
+
+                        if signal["signal"] != "no_trade" and signal["trade_type"]:
+                            tt = signal["trade_type"]
+                            sm = signal["size_mult"]
+
+                            # Check concurrent limits
+                            open_count = sum(1 for t in state["open_trades"] if t["trade_type"] == tt)
+                            max_c = cfg.get("IC_MAX_CONCURRENT", 2) if tt == "iron_condor" else cfg.get("MAX_CONCURRENT_POSITIONS", 3)
+                            last_entry = max((t["entry_date"] for t in state["open_trades"]), default=None)
+                            gap_ok = last_entry is None or (trade_date - last_entry).days >= cfg.get("MIN_ENTRY_GAP_DAYS", 2)
+
+                            # VIX harvest mode
+                            entry_mode = "normal"
+                            if cfg.get("VIX_HARVEST_ENABLED") and vix and vix >= cfg.get("VIX_HARVEST_TRIGGER", 23):
+                                entry_mode = "vix_harvest"
+
+                            if open_count < max_c and gap_ok:
+                                entry_spot = pred.nifty_spot if pred.nifty_spot and pred.nifty_spot > 0 else spot
+
+                                # Select strikes
+                                strike_cfg = {
+                                    "BULL_OTM_SELL": BULL_OTM_SELL,
+                                    "BULL_OTM_BUY": BULL_OTM_BUY,
+                                    "IC_PUT_OTM_SELL": cfg.get("IC_PUT_OTM_SELL", 0.03),
+                                    "IC_PUT_OTM_BUY": cfg.get("IC_PUT_OTM_BUY", 0.055),
+                                    "IC_CALL_OTM_SELL": cfg.get("IC_CALL_OTM_SELL", 0.04),
+                                    "IC_CALL_OTM_BUY": cfg.get("IC_CALL_OTM_BUY", 0.065),
+                                }
+                                strikes = select_strikes(entry_spot, tt, strike_cfg)
+
+                                # Price the spread
+                                expiry = get_next_weekly_expiry(trade_date)
+                                T_entry = max((expiry - trade_date).days / 365.0, 1 / 365.0)
+                                sigma_entry = vix / 100.0 if vix > 0 else 0.15
+
+                                if tt == "bull_put":
+                                    credit = price_bull_put_spread(
+                                        entry_spot, strikes["sell_strike"], strikes["buy_strike"],
+                                        T_entry, RISK_FREE_RATE, sigma_entry, apply_slippage=True
+                                    )
+                                elif tt == "iron_condor":
+                                    credit = price_iron_condor(
+                                        entry_spot, strikes["sell_strike"], strikes["buy_strike"],
+                                        strikes["ic_call_sell"], strikes["ic_call_buy"],
+                                        T_entry, RISK_FREE_RATE, sigma_entry, apply_slippage=True
+                                    )
+                                else:
+                                    credit = 0
+
+                                # Position sizing: INITIAL_CAPITAL (no compounding)
+                                pos_pct = cfg.get("IC_POSITION_SIZE_PCT", 0.15) if tt == "iron_condor" else cfg.get("POSITION_SIZE_PCT", 0.20)
+                                eff_pct = pos_pct * sm
+                                margin = MARGIN_PER_LOT_IC if tt == "iron_condor" else MARGIN_PER_LOT_BULL
+                                max_cap = INITIAL_CAPITAL * eff_pct
+                                num_lots = max(1, int(max_cap / margin))
+
+                                total_credit = credit * num_lots * NIFTY_LOT_SIZE
+                                capital_deployed = num_lots * margin
+
+                                trade_id = f"{version.replace('.', '')}-{trade_date.isoformat()}-{signal['signal']}"
+
+                                # Create trade
+                                trade = Trade(
+                                    trade_id=trade_id,
+                                    version=version,
+                                    date=trade_date,
+                                    signal_type=signal["signal"],
+                                    trade_type=tt,
+                                    entry_mode=entry_mode,
+                                    entry_date=trade_date,
+                                    entry_time=datetime.combine(trade_date, datetime.min.time().replace(hour=9, minute=20)),
+                                    entry_spot=entry_spot,
+                                    expiry=expiry,
+                                    sell_strike=strikes["sell_strike"],
+                                    buy_strike=strikes["buy_strike"],
+                                    ic_call_sell=strikes.get("ic_call_sell"),
+                                    ic_call_buy=strikes.get("ic_call_buy"),
+                                    num_lots=num_lots,
+                                    credit_received=credit,
+                                    total_credit=total_credit,
+                                    status="open",
+                                    current_pnl=0,
+                                    current_pnl_pct=0,
+                                    unrealized_pnl=0,
+                                    position_size_pct=eff_pct,
+                                    graduated_mult=sm,
+                                    capital_deployed=capital_deployed,
+                                    stop_loss_breach_days=0,
+                                    stop_loss_last_breach_date=None,
+                                    peak_pnl_pct=0.0,
+                                    predicted_drawdown=pred.predicted_drawdown,
+                                )
+                                db.add(trade)
+
+                                state["open_trades"].append({
+                                    "trade_id": trade_id,
+                                    "trade_type": tt,
+                                    "entry_date": trade_date,
+                                    "expiry": expiry,
+                                    "sell_strike": strikes["sell_strike"],
+                                    "buy_strike": strikes["buy_strike"],
+                                    "ic_call_sell": strikes.get("ic_call_sell"),
+                                    "ic_call_buy": strikes.get("ic_call_buy"),
+                                    "credit": credit,
+                                    "num_lots": num_lots,
+                                    "capital_deployed": capital_deployed,
+                                    "peak_pnl_pct": 0.0,
+                                    "stop_loss_breach_days": 0,
+                                    "stop_loss_last_breach_date": None,
+                                })
+                                stats["trades_opened"] += 1
+
+                stats["days_processed"] += 1
+
+                if stats["days_processed"] % 5 == 0:
+                    await db.commit()
+
+            await db.commit()
+
+            # 5. Build summary
+            result = await db.execute(
+                select(Trade).where(Trade.entry_date >= FORWARD_TEST_START).order_by(Trade.entry_date)
+            )
+            new_trades = result.scalars().all()
+
+            trade_summary = []
+            for t in new_trades:
+                trade_summary.append({
+                    "trade_id": t.trade_id,
+                    "entry_date": str(t.entry_date),
+                    "exit_date": str(t.exit_date) if t.exit_date else "open",
+                    "num_lots": t.num_lots,
+                    "realized_pnl": round(t.realized_pnl, 2) if t.realized_pnl else None,
+                    "exit_reason": t.exit_reason,
+                    "status": t.status,
+                })
+
+            logger.info(f"=== Forward test recalculation complete: {stats} ===")
+
+            return {
+                "status": "recalculated",
+                "stats": stats,
+                "initial_capital_used": INITIAL_CAPITAL,
+                "forward_test_start": str(FORWARD_TEST_START),
+                "dates_simulated": len(all_dates),
+                "trades": trade_summary,
+            }
+
+    except Exception as e:
+        logger.error(f"Forward test recalculation failed: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "message": str(e),
+            "traceback": traceback.format_exc(),
+        }
+
+
 @app.get("/api/debug/db-counts")
 async def db_counts():
     """Check how many rows are in each table — useful for debugging backfill."""

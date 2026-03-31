@@ -81,14 +81,15 @@ def setup_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    # 3. Check exits once daily at 3:25 PM IST (matches backtest EOD check)
-    # Backtest checks once per day at close. Using 3:25 PM (5 min before close)
-    # to match the backtest's daily exit evaluation frequency.
+    # 3. Check exits every 5 minutes during market hours (9:20 AM - 3:30 PM IST)
+    # Frequent checks ensure stop-losses trigger closer to their threshold
+    # rather than accumulating extra loss until the next daily check.
     scheduler.add_job(
         check_all_exits,
         CronTrigger(
             day_of_week="mon-fri",
-            hour=15, minute=25,
+            hour="9-15",
+            minute="*/5",
             timezone="Asia/Kolkata",
         ),
         id="check_exits",

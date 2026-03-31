@@ -89,8 +89,9 @@ class Trade(Base):
     max_profit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     max_loss_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     bear_trail_high: Mapped[float] = mapped_column(Float, default=0.0)
-    # Stop loss confirmation (matches backtest: require N consecutive breach days)
+    # Stop loss confirmation (require N consecutive CALENDAR days of breach)
     stop_loss_breach_days: Mapped[int] = mapped_column(Integer, default=0)
+    stop_loss_last_breach_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     # Trailing stop peak tracking (persisted, not in-memory)
     peak_pnl_pct: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = mapped_column(
