@@ -255,10 +255,13 @@ class TradeManager:
         return result
 
     async def check_exits(self, version: str, spot: float, vix: float,
-                           db: AsyncSession) -> list[dict]:
+                           db: AsyncSession, loss_only: bool = False) -> list[dict]:
         """
         Check all open positions for exit conditions.
-        Called every 5 minutes during market hours.
+
+        loss_only=True  → only check expiry + stop loss (runs every 5 min)
+        loss_only=False → check all conditions including profit target (runs at EOD)
+
         Returns list of closed trade dicts (for email notifications).
         """
         cfg = VERSION_CONFIGS.get(version, {})
@@ -274,9 +277,11 @@ class TradeManager:
 
         for trade in open_trades:
             if trade.is_bear_debit:
-                exit_reason = await self._check_bear_debit_exit(trade, spot, vix, cfg)
+                exit_reason = await self._check_bear_debit_exit(
+                    trade, spot, vix, cfg, loss_only=loss_only)
             else:
-                exit_reason = await self._check_single_exit(trade, spot, vix, cfg)
+                exit_reason = await self._check_single_exit(
+                    trade, spot, vix, cfg, loss_only=loss_only)
 
             if exit_reason:
                 closed_info = await self._close_trade(trade, spot, exit_reason, db, vix=vix)
@@ -289,16 +294,19 @@ class TradeManager:
         return closed_trades
 
     async def _check_single_exit(self, trade: Trade, spot: float,
-                                  vix: float, cfg: dict) -> Optional[str]:
+                                  vix: float, cfg: dict,
+                                  loss_only: bool = False) -> Optional[str]:
         """
         Check if a single credit trade should be exited. Returns exit reason or None.
 
-        Matches backtest exit hierarchy:
-        1. Expiry (DTE ≤ 1)
-        2. Profit target (day-count stages: ≤3 / 4-7 / ≥8)
-        3. Trailing stop (DB-persisted peak_pnl_pct)
-        4. Stop loss (with N-day confirmation, DB-persisted breach counter)
-        5. DTE expiry
+        loss_only=True:  only check expiry + stop loss (intraday 5-min checks)
+        loss_only=False: full check including profit target + trailing stop (EOD)
+
+        Exit hierarchy:
+        1. Expiry (DTE ≤ 1)           — always checked
+        2. Profit target               — EOD only
+        3. Trailing stop               — EOD only
+        4. Stop loss (N-day confirm)   — always checked
         """
         today = today_ist()
         dte = (trade.expiry - today).days
@@ -322,29 +330,31 @@ class TradeManager:
         pnl_per_unit = trade.credit_received - current_value
         pnl_pct = pnl_per_unit / trade.credit_received if trade.credit_received > 0 else 0
 
-        # 3. Profit target — day-count stages matching backtest
-        days_held = (today - trade.entry_date).days
-        if days_held <= 3:
-            pt = cfg.get("PROFIT_TARGET_EARLY", 0.50)
-        elif days_held <= 7:
-            pt = cfg.get("PROFIT_TARGET_MID", 0.65)
-        else:
-            pt = cfg.get("PROFIT_TARGET_LATE", 0.80)
+        # 3. Profit target — EOD only (let winners run intraday)
+        if not loss_only:
+            days_held = (today - trade.entry_date).days
+            if days_held <= 3:
+                pt = cfg.get("PROFIT_TARGET_EARLY", 0.50)
+            elif days_held <= 7:
+                pt = cfg.get("PROFIT_TARGET_MID", 0.65)
+            else:
+                pt = cfg.get("PROFIT_TARGET_LATE", 0.80)
 
-        if pnl_pct >= pt:
-            return "profit_target"
+            if pnl_pct >= pt:
+                return "profit_target"
 
-        # 4. Trailing stop — DB-persisted peak tracking
+        # 4. Trailing stop — EOD only (peak tracking always updated)
         trailing_activate = cfg.get("TRAILING_STOP_ACTIVATE", 0.40)
         trailing_level = cfg.get("TRAILING_STOP_LEVEL", 0.10)
 
         if pnl_pct >= trailing_activate:
             peak = trade.peak_pnl_pct or 0.0
-            if peak > 0 and pnl_pct < peak - trailing_level:
+            if not loss_only and peak > 0 and pnl_pct < peak - trailing_level:
                 return "trailing_stop"
+            # Always update peak tracking (even during loss_only checks)
             trade.peak_pnl_pct = max(peak, pnl_pct)
 
-        # 5. Stop loss — with N-day confirmation matching backtest
+        # 5. Stop loss — always checked (with N-day confirmation)
         sl_mult = cfg.get("STOP_LOSS_MULTIPLIER", 3.0)
         if trade.trade_type == "iron_condor":
             sl_mult = cfg.get("IC_STOP_LOSS_MULTIPLIER", 3.0)
@@ -370,7 +380,8 @@ class TradeManager:
         return None
 
     async def _check_bear_debit_exit(self, trade: Trade, spot: float,
-                                      vix: float, cfg: dict) -> Optional[str]:
+                                      vix: float, cfg: dict,
+                                      loss_only: bool = False) -> Optional[str]:
         """Check if a bear debit trade should be exited. Returns exit reason or None."""
         today = today_ist()
         dte = (trade.expiry - today).days
@@ -401,26 +412,27 @@ class TradeManager:
         # PnL ratio: (current_value - entry_debit) / entry_debit
         pnl_ratio = (current_value - entry_debit) / entry_debit
 
-        # 4. Profit target (e.g., 2x = 100% gain)
-        profit_target = cfg.get("BEAR_DEBIT_PROFIT_TARGET", 2.0)
-        if pnl_ratio >= profit_target - 1.0:  # 2.0 target means 100% gain
-            return "profit_target"
+        # 4. Profit target — EOD only
+        if not loss_only:
+            profit_target = cfg.get("BEAR_DEBIT_PROFIT_TARGET", 2.0)
+            if pnl_ratio >= profit_target - 1.0:  # 2.0 target means 100% gain
+                return "profit_target"
 
-        # 5. Stop loss (e.g., 70% loss of debit)
+        # 5. Stop loss — always checked
         stop_loss = cfg.get("BEAR_DEBIT_STOP_LOSS", 0.70)
         if pnl_ratio <= -stop_loss:
             return "stop_loss"
 
-        # 6. Trailing stop
+        # 6. Trailing stop — EOD only (trail high always updated)
         trailing_activate = cfg.get("BEAR_DEBIT_TRAILING_ACTIVATE", 1.0)
         trailing_level = cfg.get("BEAR_DEBIT_TRAILING_LEVEL", 0.30)
 
         if pnl_ratio >= trailing_activate - 1.0:
-            # Update trail high
+            # Always update trail high
             if current_value > trade.bear_trail_high:
                 trade.bear_trail_high = current_value
-            # Check if pulled back from peak
-            if trade.bear_trail_high > 0:
+            # Only exit on trailing stop at EOD
+            if not loss_only and trade.bear_trail_high > 0:
                 pullback = (trade.bear_trail_high - current_value) / trade.bear_trail_high
                 if pullback >= trailing_level:
                     return "trailing_stop"
