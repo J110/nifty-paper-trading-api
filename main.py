@@ -1136,3 +1136,235 @@ async def debug_delete_trade(trade_id: str):
     except Exception as e:
         logger.error(f"Delete trade failed for {trade_id}: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/debug/clone-v542-to-v543")
+async def clone_v542_to_v543():
+    """
+    Clone all v5.4.2 forward test data into v5.4.3.
+
+    Deletes all existing v5.4.3 forward test trades, daily_pnl, delay_prices,
+    and predictions. Then copies v5.4.2 forward test data into v5.4.3 with
+    updated version and trade_id fields.
+
+    This makes v5.4.3 identical to v5.4.2 so they can diverge only based
+    on exit frequency going forward (v5.4.2 = hybrid, v5.4.3 = all 5-min).
+    """
+    from datetime import date as date_cls
+    from sqlalchemy import select, delete, text
+    from db.database import async_session_factory
+    from db.models import Trade, DailyPnl, DelayPrice, Prediction
+
+    FORWARD_TEST_START = date_cls(2026, 2, 13)
+
+    try:
+        async with async_session_factory() as db:
+            # ── Step 1: Delete all v5.4.3 forward test data ──
+
+            # Get v5.4.3 forward test trade_ids (for delay_prices FK)
+            result = await db.execute(
+                select(Trade.trade_id).where(
+                    Trade.version == "v5.4.3",
+                    Trade.entry_date >= FORWARD_TEST_START,
+                )
+            )
+            old_trade_ids = [r[0] for r in result.all()]
+
+            # Delete delay_prices for those trades
+            if old_trade_ids:
+                await db.execute(
+                    delete(DelayPrice).where(DelayPrice.trade_id.in_(old_trade_ids))
+                )
+
+            # Delete v5.4.3 forward test trades
+            del_trades = await db.execute(
+                delete(Trade).where(
+                    Trade.version == "v5.4.3",
+                    Trade.entry_date >= FORWARD_TEST_START,
+                )
+            )
+
+            # Delete v5.4.3 forward test daily_pnl
+            del_pnl = await db.execute(
+                delete(DailyPnl).where(
+                    DailyPnl.version == "v5.4.3",
+                    DailyPnl.date >= FORWARD_TEST_START,
+                )
+            )
+
+            # Delete v5.4.3 forward test predictions
+            del_preds = await db.execute(
+                delete(Prediction).where(
+                    Prediction.version == "v5.4.3",
+                    Prediction.date >= FORWARD_TEST_START,
+                )
+            )
+
+            deleted_summary = {
+                "trades": del_trades.rowcount,
+                "daily_pnl": del_pnl.rowcount,
+                "predictions": del_preds.rowcount,
+                "delay_prices": len(old_trade_ids),
+            }
+
+            # ── Step 2: Load v5.4.2 forward test data ──
+
+            result = await db.execute(
+                select(Trade).where(
+                    Trade.version == "v5.4.2",
+                    Trade.entry_date >= FORWARD_TEST_START,
+                ).order_by(Trade.entry_date)
+            )
+            v542_trades = result.scalars().all()
+
+            result = await db.execute(
+                select(DailyPnl).where(
+                    DailyPnl.version == "v5.4.2",
+                    DailyPnl.date >= FORWARD_TEST_START,
+                ).order_by(DailyPnl.date)
+            )
+            v542_pnl = result.scalars().all()
+
+            result = await db.execute(
+                select(Prediction).where(
+                    Prediction.version == "v5.4.2",
+                    Prediction.date >= FORWARD_TEST_START,
+                ).order_by(Prediction.date)
+            )
+            v542_preds = result.scalars().all()
+
+            # ── Step 3: Clone trades ──
+            cloned_trades = []
+            trade_id_map = {}  # old v542 trade_id -> new v543 trade_id
+
+            for t in v542_trades:
+                new_trade_id = t.trade_id.replace("v542-", "v543-")
+                trade_id_map[t.trade_id] = new_trade_id
+
+                new_trade = Trade(
+                    trade_id=new_trade_id,
+                    version="v5.4.3",
+                    date=t.date,
+                    signal_type=t.signal_type,
+                    trade_type=t.trade_type,
+                    entry_mode=t.entry_mode,
+                    entry_date=t.entry_date,
+                    entry_time=t.entry_time,
+                    entry_spot=t.entry_spot,
+                    expiry=t.expiry,
+                    sell_strike=t.sell_strike,
+                    buy_strike=t.buy_strike,
+                    ic_call_sell=t.ic_call_sell,
+                    ic_call_buy=t.ic_call_buy,
+                    num_lots=t.num_lots,
+                    credit_received=t.credit_received,
+                    total_credit=t.total_credit,
+                    status=t.status,
+                    current_spread_value=t.current_spread_value,
+                    current_pnl=t.current_pnl,
+                    current_pnl_pct=t.current_pnl_pct,
+                    unrealized_pnl=t.unrealized_pnl,
+                    exit_date=t.exit_date,
+                    exit_time=t.exit_time,
+                    exit_spot=t.exit_spot,
+                    exit_reason=t.exit_reason,
+                    realized_pnl=t.realized_pnl,
+                    position_size_pct=t.position_size_pct,
+                    graduated_mult=t.graduated_mult,
+                    capital_deployed=t.capital_deployed,
+                    is_bear_debit=t.is_bear_debit,
+                    bear_tier=t.bear_tier,
+                    entry_debit=t.entry_debit,
+                    predicted_drawdown=t.predicted_drawdown,
+                    max_profit=t.max_profit,
+                    max_loss_amount=t.max_loss_amount,
+                    bear_trail_high=t.bear_trail_high,
+                    stop_loss_breach_days=t.stop_loss_breach_days,
+                    stop_loss_last_breach_date=t.stop_loss_last_breach_date,
+                    peak_pnl_pct=t.peak_pnl_pct,
+                )
+                db.add(new_trade)
+                cloned_trades.append(new_trade_id)
+
+            await db.flush()
+
+            # ── Step 4: Clone delay_prices ──
+            v542_trade_ids = [t.trade_id for t in v542_trades]
+            if v542_trade_ids:
+                result = await db.execute(
+                    select(DelayPrice).where(
+                        DelayPrice.trade_id.in_(v542_trade_ids)
+                    )
+                )
+                v542_delays = result.scalars().all()
+
+                for dp in v542_delays:
+                    new_dp = DelayPrice(
+                        trade_id=trade_id_map.get(dp.trade_id, dp.trade_id),
+                        version="v5.4.3",
+                        signal_date=dp.signal_date,
+                        signal_time=dp.signal_time,
+                        price_at_signal=dp.price_at_signal,
+                        price_at_10min=dp.price_at_10min,
+                        price_at_1hr=dp.price_at_1hr,
+                        price_at_3hr=dp.price_at_3hr,
+                        price_at_6hr=dp.price_at_6hr,
+                        price_at_12hr=dp.price_at_12hr,
+                        spread_price_at_signal=dp.spread_price_at_signal,
+                        spread_price_at_10min=dp.spread_price_at_10min,
+                        spread_price_at_1hr=dp.spread_price_at_1hr,
+                        spread_price_at_3hr=dp.spread_price_at_3hr,
+                        spread_price_at_6hr=dp.spread_price_at_6hr,
+                        spread_price_at_12hr=dp.spread_price_at_12hr,
+                    )
+                    db.add(new_dp)
+
+            # ── Step 5: Clone daily_pnl ──
+            for p in v542_pnl:
+                new_pnl = DailyPnl(
+                    date=p.date,
+                    version="v5.4.3",
+                    starting_capital=p.starting_capital,
+                    ending_capital=p.ending_capital,
+                    daily_pnl=p.daily_pnl,
+                    cumulative_pnl=p.cumulative_pnl,
+                    cumulative_return_pct=p.cumulative_return_pct,
+                    open_positions=p.open_positions,
+                    trades_opened=p.trades_opened,
+                    trades_closed=p.trades_closed,
+                )
+                db.add(new_pnl)
+
+            # ── Step 6: Clone predictions ──
+            for pred in v542_preds:
+                new_pred = Prediction(
+                    date=pred.date,
+                    timestamp=pred.timestamp,
+                    predicted_drawdown=pred.predicted_drawdown,
+                    signal_type=pred.signal_type,
+                    version="v5.4.3",
+                    nifty_spot=pred.nifty_spot,
+                    vix=pred.vix,
+                    confidence_score=pred.confidence_score,
+                    graduated_mult=pred.graduated_mult,
+                    features=pred.features,
+                )
+                db.add(new_pred)
+
+            await db.commit()
+
+            return {
+                "status": "cloned",
+                "deleted_v543": deleted_summary,
+                "cloned_from_v542": {
+                    "trades": len(cloned_trades),
+                    "daily_pnl": len(v542_pnl),
+                    "predictions": len(v542_preds),
+                    "trade_ids": cloned_trades,
+                },
+            }
+
+    except Exception as e:
+        logger.error(f"Clone v542->v543 failed: {e}", exc_info=True)
+        import traceback
+        return {"status": "error", "message": str(e), "traceback": traceback.format_exc()}
