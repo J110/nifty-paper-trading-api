@@ -212,6 +212,7 @@ class TradeManager:
             max_profit=total_max_profit,
             max_loss_amount=total_max_loss,
             bear_trail_high=0.0,
+            entry_vix=vix,
         )
 
         # Guard against duplicate trades (e.g. pipeline re-run on same day)
@@ -255,12 +256,14 @@ class TradeManager:
         return result
 
     async def check_exits(self, version: str, spot: float, vix: float,
-                           db: AsyncSession, loss_only: bool = False) -> list[dict]:
+                           db: AsyncSession, loss_only: bool = False,
+                           is_eod: bool = False) -> list[dict]:
         """
         Check all open positions for exit conditions.
 
-        loss_only=True  → only check expiry + stop loss (runs every 5 min)
-        loss_only=False → check all conditions including profit target (runs at EOD)
+        loss_only=True  → only check stop loss (runs every 5 min intraday)
+        loss_only=False → check profit target + trailing stop too
+        is_eod=True     → also check expiry (backtest evaluates at daily close)
 
         Returns list of closed trade dicts (for email notifications).
         """
@@ -278,10 +281,10 @@ class TradeManager:
         for trade in open_trades:
             if trade.is_bear_debit:
                 exit_reason = await self._check_bear_debit_exit(
-                    trade, spot, vix, cfg, loss_only=loss_only)
+                    trade, spot, vix, cfg, loss_only=loss_only, is_eod=is_eod)
             else:
                 exit_reason = await self._check_single_exit(
-                    trade, spot, vix, cfg, loss_only=loss_only)
+                    trade, spot, vix, cfg, loss_only=loss_only, is_eod=is_eod)
 
             if exit_reason:
                 closed_info = await self._close_trade(trade, spot, exit_reason, db, vix=vix)
@@ -295,28 +298,26 @@ class TradeManager:
 
     async def _check_single_exit(self, trade: Trade, spot: float,
                                   vix: float, cfg: dict,
-                                  loss_only: bool = False) -> Optional[str]:
+                                  loss_only: bool = False,
+                                  is_eod: bool = False) -> Optional[str]:
         """
         Check if a single credit trade should be exited. Returns exit reason or None.
 
-        loss_only=True:  only check expiry + stop loss (intraday 5-min checks)
-        loss_only=False: full check including profit target + trailing stop (EOD)
+        loss_only=True:  only check stop loss (intraday 5-min checks)
+        loss_only=False: also check profit target + trailing stop
+        is_eod=True:     also check expiry (backtest evaluates at daily close)
 
-        Exit hierarchy:
-        1. Expiry (DTE ≤ 1)           — always checked
-        2. Profit target               — EOD only
-        3. Trailing stop               — EOD only
-        4. Stop loss (N-day confirm)   — always checked
+        Exit order matches backtest (check_exit_credit):
+        1. Profit target               — EOD only
+        2. Trailing stop               — EOD only
+        3. Stop loss (N-day confirm)   — always checked
+        4. VIX spike                   — always checked
+        5. Expiry (DTE ≤ 1)            — EOD only (matches backtest daily-close eval)
         """
         today = today_ist()
         dte = (trade.expiry - today).days
 
-        # 1. Expiry exit
-        min_dte = cfg.get("MIN_DTE_EXIT", 1)
-        if dte <= min_dte:
-            return "expiry"
-
-        # 2. Compute current spread value
+        # Compute current spread value (needed for all checks)
         T = max(dte / 365.0, 1 / 365.0)
         sigma = vix / 100.0 if vix else 0.15
         current_value = compute_spread_value(
@@ -330,7 +331,10 @@ class TradeManager:
         pnl_per_unit = trade.credit_received - current_value
         pnl_pct = pnl_per_unit / trade.credit_received if trade.credit_received > 0 else 0
 
-        # 3. Profit target — EOD only (let winners run intraday)
+        # Always update peak tracking unconditionally (backtest does this before all checks)
+        trade.peak_pnl_pct = max(trade.peak_pnl_pct or 0.0, pnl_pct)
+
+        # --- 1. Profit target — EOD only (let winners run intraday) ---
         if not loss_only:
             days_held = (today - trade.entry_date).days
             if days_held <= 3:
@@ -343,25 +347,31 @@ class TradeManager:
             if pnl_pct >= pt:
                 return "profit_target"
 
-        # 4. Trailing stop — EOD only (peak tracking always updated)
+        # --- 2. Trailing stop — activation is persistent, exit is EOD only ---
         trailing_activate = cfg.get("TRAILING_STOP_ACTIVATE", 0.40)
         trailing_level = cfg.get("TRAILING_STOP_LEVEL", 0.10)
 
+        # Persistent activation: once True, stays True for the trade (matches backtest)
         if pnl_pct >= trailing_activate:
-            peak = trade.peak_pnl_pct or 0.0
-            if not loss_only and peak > 0 and pnl_pct < peak - trailing_level:
-                return "trailing_stop"
-            # Always update peak tracking (even during loss_only checks)
-            trade.peak_pnl_pct = max(peak, pnl_pct)
+            trade.trailing_stop_active = True
 
-        # 5. Stop loss — always checked (with N-day confirmation)
+        # Check trailing stop even if pnl dropped below activation (backtest behaviour)
+        if not loss_only and trade.trailing_stop_active:
+            peak = trade.peak_pnl_pct or 0.0
+            if peak > 0:
+                retrace = peak - pnl_pct
+                # Backtest: retrace > peak * level AND still profitable
+                if retrace > peak * trailing_level and pnl_pct > 0:
+                    return "trailing_stop"
+
+        # --- 3. Stop loss — always checked (with N-day confirmation) ---
         sl_mult = cfg.get("STOP_LOSS_MULTIPLIER", 3.0)
         if trade.trade_type == "iron_condor":
             sl_mult = cfg.get("IC_STOP_LOSS_MULTIPLIER", 3.0)
 
-        confirm_days = cfg.get("STOP_LOSS_CONFIRM_DAYS", 1)
+        confirm_days = cfg.get("STOP_LOSS_CONFIRM_DAYS", 2)
         if trade.trade_type == "iron_condor":
-            confirm_days = cfg.get("IC_STOP_LOSS_CONFIRM_DAYS", 1)
+            confirm_days = cfg.get("IC_STOP_LOSS_CONFIRM_DAYS", 2)
 
         max_loss = trade.credit_received * sl_mult
         if current_value >= max_loss + trade.credit_received:
@@ -370,24 +380,39 @@ class TradeManager:
             if last_breach != today:
                 trade.stop_loss_breach_days = (trade.stop_loss_breach_days or 0) + 1
                 trade.stop_loss_last_breach_date = today
-            if trade.stop_loss_breach_days >= confirm_days:
+            # Backtest uses strict > (needs confirm_days+1 iterations to trigger)
+            if trade.stop_loss_breach_days > confirm_days:
                 return "stop_loss"
         else:
             # Recovery — reset breach counter
             trade.stop_loss_breach_days = 0
             trade.stop_loss_last_breach_date = None
 
+        # --- 4. VIX spike exit (matches backtest: VIX > threshold AND VIX > entry * 1.3) ---
+        vix_spike_threshold = cfg.get("VIX_SPIKE_EXIT")
+        if vix_spike_threshold and vix:
+            entry_vix = trade.entry_vix
+            if entry_vix and vix > vix_spike_threshold and vix > entry_vix * 1.3:
+                return "vix_spike"
+
+        # --- 5. Expiry exit — EOD only (backtest evaluates at daily close) ---
+        if is_eod:
+            min_dte = cfg.get("MIN_DTE_EXIT", 1)
+            if dte <= min_dte:
+                return "expiry"
+
         return None
 
     async def _check_bear_debit_exit(self, trade: Trade, spot: float,
                                       vix: float, cfg: dict,
-                                      loss_only: bool = False) -> Optional[str]:
+                                      loss_only: bool = False,
+                                      is_eod: bool = False) -> Optional[str]:
         """Check if a bear debit trade should be exited. Returns exit reason or None."""
         today = today_ist()
         dte = (trade.expiry - today).days
 
-        # 1. Expiry exit
-        if dte <= 1:
+        # 1. Expiry exit — EOD only (matches backtest daily-close evaluation)
+        if is_eod and dte <= 1:
             return "expiry"
 
         # 2. Max hold days

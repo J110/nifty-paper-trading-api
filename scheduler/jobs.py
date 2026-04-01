@@ -523,12 +523,13 @@ async def check_all_exits():
 
         async with async_session_factory() as db:
             for version in ACTIVE_VERSIONS:
-                # v5.4.2/v5.4.4 hybrid: only loss checks (stop loss + expiry) intraday;
+                # v5.4.2/v5.4.4 hybrid: only loss checks (stop loss) intraday;
                 # profit target + trailing stop checked at EOD.
-                # v5.4.3: full checks every 5 minutes.
+                # v5.4.3: full checks every 5 minutes (except expiry — always EOD).
+                # Expiry is EOD-only for all versions (matches backtest daily-close eval).
                 loss_only = (version in ("v5.4.2", "v5.4.4"))
                 closed_trades = await trade_manager.check_exits(
-                    version, spot, vix, db, loss_only=loss_only
+                    version, spot, vix, db, loss_only=loss_only, is_eod=False
                 )
 
                 # ===== EMAIL: Trade closed =====
@@ -583,10 +584,10 @@ async def eod_processing():
 
         async with async_session_factory() as db:
             for version in ACTIVE_VERSIONS:
-                # Final exit check — full check for all versions (loss_only=False)
-                # This is where v5.4.2 profit target + trailing stop get evaluated
+                # Final exit check — full check for all versions
+                # is_eod=True enables expiry check (matches backtest daily-close eval)
                 closed_trades = await trade_manager.check_exits(
-                    version, spot, vix, db, loss_only=False
+                    version, spot, vix, db, loss_only=False, is_eod=True
                 )
 
                 # Send exit emails for EOD closures too

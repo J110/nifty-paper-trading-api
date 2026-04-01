@@ -94,6 +94,10 @@ class Trade(Base):
     stop_loss_last_breach_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     # Trailing stop peak tracking (persisted, not in-memory)
     peak_pnl_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    # Trailing stop activation (persistent — once True, stays True for the trade)
+    trailing_stop_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    # VIX at entry (for VIX spike exit: exit if VIX > threshold AND VIX > entry_vix * 1.3)
+    entry_vix: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

@@ -103,6 +103,7 @@ VERSION_CONFIGS = {
         "TRAILING_STOP_ACTIVATE": 0.40,
         "TRAILING_STOP_LEVEL": 0.10,
         "MIN_DTE_EXIT": 1,
+        "VIX_SPIKE_EXIT": 25,
 
         # Signal mapping type
         "SIGNAL_MAPPING": "sharp",  # sharp thresholds
@@ -146,6 +147,7 @@ VERSION_CONFIGS = {
         "TRAILING_STOP_ACTIVATE": 0.40,
         "TRAILING_STOP_LEVEL": 0.10,
         "MIN_DTE_EXIT": 1,
+        "VIX_SPIKE_EXIT": 25,
 
         # Signal mapping type (same as v5.4.2)
         "SIGNAL_MAPPING": "sharp",

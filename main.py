@@ -503,15 +503,18 @@ async def recalculate_forward_test():
 
     logger.info("=== Starting forward test recalculation ===")
 
-    # Ensure new column exists (added in this deploy)
+    # Ensure new columns exist
     try:
         async with async_session_factory() as migrate_db:
             from sqlalchemy import text as _text
-            await migrate_db.execute(_text(
-                "ALTER TABLE trades ADD COLUMN IF NOT EXISTS stop_loss_last_breach_date DATE"
-            ))
+            for col_sql in [
+                "ALTER TABLE trades ADD COLUMN IF NOT EXISTS stop_loss_last_breach_date DATE",
+                "ALTER TABLE trades ADD COLUMN IF NOT EXISTS trailing_stop_active BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE trades ADD COLUMN IF NOT EXISTS entry_vix FLOAT",
+            ]:
+                await migrate_db.execute(_text(col_sql))
             await migrate_db.commit()
-            logger.info("Ensured stop_loss_last_breach_date column exists")
+            logger.info("Ensured all required columns exist")
     except Exception as e:
         logger.warning(f"Column migration note: {e}")
 
@@ -642,11 +645,12 @@ async def recalculate_forward_test():
 
                         exit_reason = None
 
-                        # 1. Expiry
-                        if dte <= cfg.get("MIN_DTE_EXIT", 1):
-                            exit_reason = "expiry"
+                        # Always update peak tracking unconditionally (matches backtest)
+                        ot["peak_pnl_pct"] = max(ot.get("peak_pnl_pct", 0.0), pnl_pct)
 
-                        # 2. Profit target
+                        # Exit order matches backtest: profit_target → trailing_stop → stop_loss → vix_spike → expiry
+
+                        # 1. Profit target
                         if not exit_reason:
                             days_held = (trade_date - ot["entry_date"]).days
                             if days_held <= 3:
@@ -658,31 +662,47 @@ async def recalculate_forward_test():
                             if pnl_pct >= pt:
                                 exit_reason = "profit_target"
 
-                        # 3. Trailing stop
+                        # 2. Trailing stop — persistent activation, proportional retracement
                         if not exit_reason:
                             ta = cfg.get("TRAILING_STOP_ACTIVATE", 0.40)
                             tl = cfg.get("TRAILING_STOP_LEVEL", 0.10)
                             if pnl_pct >= ta:
+                                ot["trailing_stop_active"] = True
+                            if ot.get("trailing_stop_active"):
                                 peak = ot.get("peak_pnl_pct", 0.0)
-                                if peak > 0 and pnl_pct < peak - tl:
-                                    exit_reason = "trailing_stop"
-                                ot["peak_pnl_pct"] = max(peak, pnl_pct)
+                                if peak > 0:
+                                    retrace = peak - pnl_pct
+                                    if retrace > peak * tl and pnl_pct > 0:
+                                        exit_reason = "trailing_stop"
 
-                        # 4. Stop loss — per-CALENDAR-DAY breach tracking
+                        # 3. Stop loss — per-CALENDAR-DAY breach, strict > (matches backtest)
                         if not exit_reason:
                             sl_mult = cfg.get("IC_STOP_LOSS_MULTIPLIER", 3.0) if ot["trade_type"] == "iron_condor" else cfg.get("STOP_LOSS_MULTIPLIER", 3.0)
-                            cd = cfg.get("IC_STOP_LOSS_CONFIRM_DAYS", 1) if ot["trade_type"] == "iron_condor" else cfg.get("STOP_LOSS_CONFIRM_DAYS", 1)
+                            cd = cfg.get("IC_STOP_LOSS_CONFIRM_DAYS", 2) if ot["trade_type"] == "iron_condor" else cfg.get("STOP_LOSS_CONFIRM_DAYS", 2)
 
                             if current_value >= ot["credit"] * sl_mult + ot["credit"]:
                                 last_breach = ot.get("stop_loss_last_breach_date")
                                 if last_breach != trade_date:
                                     ot["stop_loss_breach_days"] = ot.get("stop_loss_breach_days", 0) + 1
                                     ot["stop_loss_last_breach_date"] = trade_date
-                                if ot["stop_loss_breach_days"] >= cd:
+                                if ot["stop_loss_breach_days"] > cd:
                                     exit_reason = "stop_loss"
                             else:
                                 ot["stop_loss_breach_days"] = 0
                                 ot["stop_loss_last_breach_date"] = None
+
+                        # 4. VIX spike exit (matches backtest: VIX > threshold AND VIX > entry * 1.3)
+                        if not exit_reason:
+                            vix_spike_threshold = cfg.get("VIX_SPIKE_EXIT")
+                            if vix_spike_threshold and vix > 0:
+                                entry_vix = ot.get("entry_vix", 0)
+                                if entry_vix and vix > vix_spike_threshold and vix > entry_vix * 1.3:
+                                    exit_reason = "vix_spike"
+
+                        # 5. Expiry (last — matches backtest priority)
+                        if not exit_reason:
+                            if dte <= cfg.get("MIN_DTE_EXIT", 1):
+                                exit_reason = "expiry"
 
                         if exit_reason:
                             realized_pnl = pnl_per_unit * ot["num_lots"] * NIFTY_LOT_SIZE
@@ -813,6 +833,8 @@ async def recalculate_forward_test():
                                     stop_loss_breach_days=0,
                                     stop_loss_last_breach_date=None,
                                     peak_pnl_pct=0.0,
+                                    trailing_stop_active=False,
+                                    entry_vix=vix,
                                     predicted_drawdown=pred.predicted_drawdown,
                                 )
                                 db.add(trade)
@@ -830,6 +852,8 @@ async def recalculate_forward_test():
                                     "num_lots": num_lots,
                                     "capital_deployed": capital_deployed,
                                     "peak_pnl_pct": 0.0,
+                                    "trailing_stop_active": False,
+                                    "entry_vix": vix,
                                     "stop_loss_breach_days": 0,
                                     "stop_loss_last_breach_date": None,
                                 })
