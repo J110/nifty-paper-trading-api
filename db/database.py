@@ -42,8 +42,24 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    """Create all tables defined on the ORM Base."""
+    """Create all tables and ensure new columns exist.
+
+    create_all only creates tables that don't exist — it does NOT add
+    columns to existing tables.  We run lightweight ALTER TABLE statements
+    for any columns added after the initial schema so that deploys don't
+    silently break queries/inserts.
+    """
     from db.models import Base  # local import to avoid circular deps
+    from sqlalchemy import text
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        # Columns added after initial schema — safe to re-run (IF NOT EXISTS)
+        migrations = [
+            "ALTER TABLE trades ADD COLUMN IF NOT EXISTS stop_loss_last_breach_date DATE",
+            "ALTER TABLE trades ADD COLUMN IF NOT EXISTS trailing_stop_active BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE trades ADD COLUMN IF NOT EXISTS entry_vix FLOAT",
+        ]
+        for sql in migrations:
+            await conn.execute(text(sql))

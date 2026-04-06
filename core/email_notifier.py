@@ -186,22 +186,57 @@ def _build_no_trade_html(
     spot: float,
     vix: float,
     version_signals: list[dict],
+    blocked_versions: list[dict] = None,
 ) -> str:
-    """Build HTML for when all versions produce no_trade."""
+    """Build HTML for when no trades were opened.
+
+    blocked_versions: versions where signal was bullish but trade was blocked
+    (entry gap, max concurrent, etc.). If non-empty, the email explains the
+    block reason instead of saying "high risk".
+    """
+    blocked_versions = blocked_versions or []
+    blocked_set = {bv["version"] for bv in blocked_versions}
+    is_blocked = len(blocked_set) > 0
+
     rows = ""
     for vs in version_signals:
         cfg = VERSION_CONFIGS.get(vs["version"], {})
+        signal = vs["signal"]
+        if vs["version"] in blocked_set:
+            # Signal was bullish but trade was blocked
+            signal_display = f"{signal.replace('_', ' ').upper()} (blocked)"
+            signal_color = "#ffa657"  # orange
+        elif signal == "no_trade":
+            signal_display = "NO TRADE"
+            signal_color = "#f85149"  # red
+        else:
+            signal_display = signal.replace("_", " ").upper()
+            signal_color = "#3fb950"  # green
         rows += f"""
         <tr>
             <td style="color:#e6edf3;padding:6px 12px;">{vs['version']} ({cfg.get('label', '')})</td>
-            <td style="color:#f85149;padding:6px 12px;font-weight:600;">NO TRADE</td>
+            <td style="color:{signal_color};padding:6px 12px;font-weight:600;">{signal_display}</td>
         </tr>"""
+
+    if is_blocked:
+        header_color = "#ffa657"  # orange for blocked
+        header_title = "\u26A0\uFE0F Trade Blocked"
+        footer_text = (
+            "Signal was bullish but trades blocked by entry gap or position limits. "
+            "Existing positions may need to close first."
+        )
+    else:
+        header_color = "#f85149"  # red for no_trade
+        header_title = "\U0001F534 No Trade Today"
+        footer_text = "Model predicts high risk \u2014 sitting out today."
+
+    drawdown_color = '#f85149' if prediction < -0.05 else '#ffa657' if prediction < -0.025 else '#3fb950'
 
     return f"""
     <div style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;background:#0d1117;border:1px solid #30363d;border-radius:12px;overflow:hidden;">
-        <div style="background:#f85149;padding:20px 24px;">
+        <div style="background:{header_color};padding:20px 24px;">
             <h1 style="margin:0;color:#fff;font-size:20px;font-weight:600;">
-                \U0001F534 No Trade Today
+                {header_title}
             </h1>
             <p style="margin:4px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">
                 {now_ist().strftime('%d %b %Y, %I:%M %p IST')}
@@ -214,7 +249,7 @@ def _build_no_trade_html(
                 <tr><td style="color:#8b949e;padding:4px 12px;">VIX</td>
                     <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{vix:.2f}</td></tr>
                 <tr><td style="color:#8b949e;padding:4px 12px;">Predicted Drawdown</td>
-                    <td style="color:#f85149;padding:4px 12px;font-weight:600;">{prediction*100:.2f}%</td></tr>
+                    <td style="color:{drawdown_color};padding:4px 12px;font-weight:600;">{prediction*100:.2f}%</td></tr>
             </table>
             <h3 style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:16px 0 8px;">
                 All Versions
@@ -225,7 +260,7 @@ def _build_no_trade_html(
         </div>
         <div style="padding:12px 24px 16px;border-top:1px solid #21262d;">
             <p style="color:#484f58;font-size:11px;margin:0;text-align:center;">
-                Model predicts high risk — sitting out today.
+                {footer_text}
             </p>
         </div>
     </div>
@@ -328,18 +363,32 @@ async def send_no_trade_alert(
     spot: float,
     vix: float,
     version_signals: list[dict],
+    blocked_versions: list[dict] = None,
 ) -> bool:
-    """Send email when all versions produce no_trade signal."""
+    """Send email when no trades were opened.
+
+    blocked_versions: if non-empty, signals were bullish but trades were
+    blocked by entry gap / position limits (not by model signal).
+    """
     if not RESEND_API_KEY:
         logger.warning("RESEND_API_KEY not set — skipping email notification")
         return False
 
-    subject = (
-        f"\U0001F534 NO TRADE TODAY | "
-        f"Nifty {spot:,.0f} | Drawdown {prediction*100:.2f}%"
-    )
+    blocked_versions = blocked_versions or []
+    if blocked_versions:
+        signals = ", ".join(bv["signal"].replace("_", " ") for bv in blocked_versions)
+        subject = (
+            f"\u26A0\uFE0F TRADE BLOCKED | "
+            f"Signal: {signals} | "
+            f"Nifty {spot:,.0f} | Drawdown {prediction*100:.2f}%"
+        )
+    else:
+        subject = (
+            f"\U0001F534 NO TRADE TODAY | "
+            f"Nifty {spot:,.0f} | Drawdown {prediction*100:.2f}%"
+        )
 
-    html = _build_no_trade_html(prediction, spot, vix, version_signals)
+    html = _build_no_trade_html(prediction, spot, vix, version_signals, blocked_versions)
     return await _send_email(subject, html)
 
 

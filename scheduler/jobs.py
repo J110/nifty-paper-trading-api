@@ -138,11 +138,12 @@ async def run_data_update():
             today = today_ist()
             if last_date != "unknown":
                 from datetime import date
+                from core.market_holidays import trading_days_between
                 last_dt = date.fromisoformat(last_date)
-                days_behind = (today - last_dt).days
-                if days_behind > 3:
+                trading_days_behind = trading_days_between(last_dt, today)
+                if trading_days_behind > 2:
                     logger.error(
-                        f"STALE DATA: parquet at {last_date}, {days_behind} days behind!"
+                        f"STALE DATA: parquet at {last_date}, {trading_days_behind} trading days behind!"
                     )
                     await send_data_stale_alert(
                         last_parquet_date=last_date,
@@ -329,6 +330,7 @@ async def generate_daily_predictions():
         # Track trades opened and all signals (for no-trade email)
         trades_opened = []
         all_version_signals = []
+        blocked_versions = []  # versions where signal was bullish but trade blocked
 
         # Store in DB
         async with async_session_factory() as db:
@@ -427,6 +429,12 @@ async def generate_daily_predictions():
                                 )
                                 logger.info(f"[{version}] Opened trade: {trade_result['trade_id']}")
                                 trades_opened.append((version, signal, trade_result))
+                            else:
+                                # Signal was bullish but trade blocked (entry gap, max concurrent, etc.)
+                                blocked_versions.append({
+                                    "version": version,
+                                    "signal": signal["signal"],
+                                })
                         except Exception as e:
                             logger.error(f"[{version}] Failed to open trade: {e}")
                             try:
@@ -461,13 +469,13 @@ async def generate_daily_predictions():
                 except Exception as e:
                     logger.error(f"Failed to send trade alert email for {version}: {e}")
         else:
-            # All versions produced no_trade — send daily no-trade summary
             try:
                 await send_no_trade_alert(
                     prediction=prediction_value,
                     spot=spot,
                     vix=vix,
                     version_signals=all_version_signals,
+                    blocked_versions=blocked_versions,
                 )
             except Exception as e:
                 logger.error(f"Failed to send no-trade alert email: {e}")

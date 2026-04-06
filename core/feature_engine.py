@@ -183,11 +183,13 @@ async def build_live_features(dhan_client, historical_df: pd.DataFrame,
     # STALENESS GUARD: HARD BLOCK if parquet is more than 2 trading days behind.
     # (1 day behind is normal — we compute features at 9:20 AM using
     # yesterday's close. But 2+ days means the data update failed.)
-    # This prevents opening trades based on stale/wrong predictions.
-    days_behind = (today - last_parquet_date).days
-    if days_behind > 3:  # >3 calendar days ≈ >2 trading days
+    # Uses actual trading-day count (excl. weekends + NSE holidays) to avoid
+    # false positives on long weekends like Good Friday + Sat/Sun.
+    from core.market_holidays import trading_days_between
+    trading_days_behind = trading_days_between(last_parquet_date, today)
+    if trading_days_behind > 2:
         raise StaleDataError(
-            f"merged_daily.parquet is {days_behind} days stale "
+            f"merged_daily.parquet is {trading_days_behind} trading days stale "
             f"(last: {last_parquet_date}, today: {today}). "
             f"Data update likely failed — refusing to generate predictions."
         )
