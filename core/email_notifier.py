@@ -4,6 +4,7 @@ Sends beautifully formatted HTML emails when trades are ready to execute.
 """
 
 import logging
+import time
 import httpx
 from datetime import datetime
 from core.timezone import now_ist
@@ -16,6 +17,13 @@ import os
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "anmol@turings.xyz")
 FROM_EMAIL = "Nifty Trading Bot <onboarding@resend.dev>"  # Free tier uses resend.dev domain
+
+# ---------------------------------------------------------------------------
+# Alert deduplication: suppress repeated failure alerts for the same pipeline.
+# Only one alert per pipeline per ALERT_COOLDOWN_SECONDS (default 1 hour).
+# ---------------------------------------------------------------------------
+ALERT_COOLDOWN_SECONDS = 3600  # 1 hour
+_last_alert_ts: dict[str, float] = {}  # pipeline_name -> monotonic timestamp
 
 
 def _signal_emoji(signal: str) -> str:
@@ -464,9 +472,23 @@ async def send_pipeline_failure_alert(
     error_msg: str,
     stage: str = "",
 ) -> bool:
-    """Send alert when a scheduled pipeline (prediction, exit check, EOD) fails."""
+    """Send alert when a scheduled pipeline (prediction, exit check, EOD) fails.
+
+    Suppresses duplicate alerts for the same pipeline within ALERT_COOLDOWN_SECONDS
+    to avoid flooding the inbox when the Dhan API is down.
+    """
     if not RESEND_API_KEY:
         logger.warning("RESEND_API_KEY not set — skipping pipeline failure alert")
+        return False
+
+    # Dedup: skip if we already sent an alert for this pipeline recently
+    now = time.monotonic()
+    last_sent = _last_alert_ts.get(pipeline_name, 0)
+    if now - last_sent < ALERT_COOLDOWN_SECONDS:
+        logger.warning(
+            f"Pipeline failure alert for '{pipeline_name}' suppressed "
+            f"(cooldown: {int(ALERT_COOLDOWN_SECONDS - (now - last_sent))}s remaining)"
+        )
         return False
 
     emoji = "\U0001F6A8"  # 🚨
@@ -517,7 +539,10 @@ async def send_pipeline_failure_alert(
     </div>
     """
 
-    return await _send_email(subject, html)
+    sent = await _send_email(subject, html)
+    if sent:
+        _last_alert_ts[pipeline_name] = time.monotonic()
+    return sent
 
 
 async def send_data_stale_alert(

@@ -25,6 +25,7 @@ from core.email_notifier import (
     send_data_stale_alert, send_pipeline_failure_alert,
 )
 from core.data_updater import update_merged_daily
+from core.market_holidays import NSE_HOLIDAYS_2026 as _NSE_HOLIDAYS
 from config import (
     ACTIVE_VERSIONS, VERSION_CONFIGS, INITIAL_CAPITAL,
     DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH,
@@ -122,6 +123,10 @@ async def run_data_update():
     >3 calendar days stale, the prediction pipeline will REFUSE to run
     (raises StaleDataError) to prevent opening trades on wrong signals.
     """
+    if today_ist() in _NSE_HOLIDAYS:
+        logger.info("Data update skipped — market holiday")
+        return
+
     logger.info("=== Starting daily data update ===")
     try:
         result = await update_merged_daily()
@@ -289,6 +294,10 @@ async def generate_daily_predictions():
     7. Store prediction + features in DB
     8. If all versions = no_trade: send no-trade email
     """
+    if today_ist() in _NSE_HOLIDAYS:
+        logger.info("Prediction pipeline skipped — market holiday")
+        return
+
     logger.info("=== Starting daily prediction pipeline ===")
 
     try:
@@ -516,6 +525,11 @@ async def generate_daily_predictions():
 
 async def check_all_exits():
     """Check all open positions for exit conditions."""
+    # Skip on market holidays — Dhan won't return prices
+    if today_ist() in _NSE_HOLIDAYS:
+        logger.debug("Exit check skipped — market holiday")
+        return
+
     try:
         spot = await dhan_client.get_nifty_ltp()
         vix = await dhan_client.get_india_vix()
@@ -575,6 +589,11 @@ async def check_all_exits():
 
 async def eod_processing():
     """End-of-day processing: final mark-to-market, record daily PnL."""
+    # Skip on market holidays — no trading activity to process
+    if today_ist() in _NSE_HOLIDAYS:
+        logger.info("EOD processing skipped — market holiday")
+        return
+
     logger.info("=== Starting EOD processing ===")
 
     try:
