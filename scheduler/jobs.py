@@ -523,6 +523,43 @@ async def generate_daily_predictions():
         raise  # Re-raise so callers (manual trigger) can see the error
 
 
+async def _get_spot_vix_with_fallback(db: "AsyncSession") -> tuple:
+    """
+    Get Nifty spot and VIX from Dhan, falling back to the most recent
+    price snapshot in the DB if Dhan is unreachable.
+    Returns (spot, vix, source) where source is "dhan" or "snapshot_fallback".
+    """
+    spot = await dhan_client.get_nifty_ltp()
+    vix = await dhan_client.get_india_vix()
+
+    if spot is not None:
+        return spot, vix, "dhan"
+
+    # Fallback: most recent price snapshot from DB
+    logger.warning("Dhan LTP unavailable — falling back to latest DB price snapshot")
+    result = await db.execute(
+        select(PriceSnapshot)
+        .order_by(PriceSnapshot.timestamp.desc())
+        .limit(1)
+    )
+    snapshot = result.scalar_one_or_none()
+
+    if snapshot:
+        # Only use snapshot if it's from today (stale snapshots are dangerous)
+        from datetime import timedelta
+        snapshot_age = now_ist() - snapshot.timestamp
+        if snapshot_age < timedelta(hours=8):
+            logger.warning(
+                f"Using snapshot fallback: spot={snapshot.nifty_spot}, "
+                f"vix={snapshot.vix}, age={snapshot_age}"
+            )
+            return snapshot.nifty_spot, snapshot.vix, "snapshot_fallback"
+        else:
+            logger.error(f"Latest snapshot too old ({snapshot_age}) — cannot use as fallback")
+
+    return None, None, "unavailable"
+
+
 async def check_all_exits():
     """Check all open positions for exit conditions."""
     # Skip on market holidays — Dhan won't return prices
@@ -531,17 +568,20 @@ async def check_all_exits():
         return
 
     try:
-        spot = await dhan_client.get_nifty_ltp()
-        vix = await dhan_client.get_india_vix()
+        async with async_session_factory() as db:
+            spot, vix, source = await _get_spot_vix_with_fallback(db)
 
         if spot is None:
-            logger.error("EXIT CHECK FAILED: Cannot get Nifty spot price — Dhan API down")
+            logger.error("EXIT CHECK FAILED: Cannot get Nifty spot price — Dhan API down and no recent snapshot fallback")
             await send_pipeline_failure_alert(
                 pipeline_name="Exit Check",
-                error_msg="Cannot get Nifty spot price (Dhan API returned None). Exit checks SKIPPED — open trades were NOT evaluated for stop-loss or expiry.",
+                error_msg="Cannot get Nifty spot price (Dhan API returned None, no recent DB snapshot). Exit checks SKIPPED — open trades were NOT evaluated for stop-loss or expiry.",
                 stage="check_exits",
             )
             return
+
+        if source == "snapshot_fallback":
+            logger.warning("Running exit checks with snapshot fallback price — stop-loss checks only")
 
         async with async_session_factory() as db:
             for version in ACTIVE_VERSIONS:
@@ -597,17 +637,20 @@ async def eod_processing():
     logger.info("=== Starting EOD processing ===")
 
     try:
-        spot = await dhan_client.get_nifty_ltp()
-        vix = await dhan_client.get_india_vix()
+        async with async_session_factory() as db:
+            spot, vix, source = await _get_spot_vix_with_fallback(db)
 
         if spot is None:
-            logger.error("EOD FAILED: Cannot get Nifty spot price — Dhan API down")
+            logger.error("EOD FAILED: Cannot get Nifty spot price — Dhan API down and no recent snapshot fallback")
             await send_pipeline_failure_alert(
                 pipeline_name="EOD Processing",
-                error_msg="Cannot get Nifty spot price (Dhan API returned None). EOD processing SKIPPED — no PnL recorded, no final exit checks.",
+                error_msg="Cannot get Nifty spot price (Dhan API returned None, no recent DB snapshot). EOD processing SKIPPED — no PnL recorded, no final exit checks.",
                 stage="eod_processing",
             )
             return
+
+        if source == "snapshot_fallback":
+            logger.warning("Running EOD processing with snapshot fallback price")
 
         async with async_session_factory() as db:
             for version in ACTIVE_VERSIONS:

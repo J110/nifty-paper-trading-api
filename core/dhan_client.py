@@ -115,11 +115,23 @@ class DhanClient:
                 raise DhanAPIError(f"Network error: {exc}") from exc
 
             if resp.status_code == 401:
-                logger.error("Authentication failed (401) — token may be expired")
+                body = resp.text
+                # Distinguish subscription errors from auth errors
+                if "806" in body or "DH-902" in body or "not subscribed" in body.lower():
+                    logger.error(
+                        "Data API subscription inactive (401) — "
+                        "subscribe at web.dhan.co → Profile → Access DhanHQ APIs"
+                    )
+                    raise DhanAPIError(
+                        "Data APIs not subscribed — activate at web.dhan.co",
+                        status_code=401,
+                        body=body,
+                    )
+                logger.error("Authentication failed (401) — token expired or invalid")
                 raise DhanAPIError(
-                    "Authentication failed — check DHAN_ACCESS_TOKEN",
+                    "Authentication failed — generate new token at web.dhan.co",
                     status_code=401,
-                    body=resp.text,
+                    body=body,
                 )
 
             if resp.status_code == 429 and attempt < retries:
@@ -282,7 +294,7 @@ class DhanClient:
             return await self._post(
                 "/optionchain",
                 {
-                    "UnderlyingScrip": "NIFTY",
+                    "UnderlyingScrip": NIFTY_SECURITY_ID,
                     "UnderlyingSeg": "IDX_I",
                     "Expiry": expiry_date,
                 },

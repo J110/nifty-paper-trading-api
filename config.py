@@ -39,7 +39,7 @@ NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "anmol@turings.xyz")
 
 # Dhan security IDs
 DHAN_NIFTY_SECURITY_ID = "13"
-DHAN_VIX_SECURITY_ID = "26"
+DHAN_VIX_SECURITY_ID = "21"  # Confirmed from Dhan scrip master (was 26, which was wrong)
 DHAN_RATE_LIMIT_DELAY = 0.25
 
 # ============================================================
