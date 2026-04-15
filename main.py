@@ -1379,3 +1379,158 @@ async def clone_v542_to_v543():
         logger.error(f"Clone v542->v543 failed: {e}", exc_info=True)
         import traceback
         return {"status": "error", "message": str(e), "traceback": traceback.format_exc()}
+
+
+@app.post("/api/debug/correct-stale-trades")
+async def correct_stale_trades(correct_spot: float, correct_vix: float):
+    """
+    Correct today's trades and predictions that were opened with stale
+    fallback prices (e.g. after a Dhan token expiry). Recalculates strikes
+    and credit using the correct spot/VIX values.
+    """
+    from datetime import date as date_cls
+    from sqlalchemy import select
+    from db.database import async_session_factory
+    from db.models import Trade, Prediction
+    from core.option_pricer import (
+        select_strikes, price_bull_put_spread, price_iron_condor,
+        price_bear_put_debit, price_bear_call_spread,
+        get_next_weekly_expiry, compute_time_to_expiry_years,
+    )
+    from config import (
+        RISK_FREE_RATE, NIFTY_LOT_SIZE, BULL_OTM_SELL, BULL_OTM_BUY,
+        VERSION_CONFIGS,
+    )
+    from core.timezone import today_ist
+
+    today = today_ist()
+    sigma = correct_vix / 100.0
+
+    try:
+        async with async_session_factory() as db:
+            # ── Fix trades ──
+            result = await db.execute(
+                select(Trade).where(Trade.entry_date == today, Trade.status == "open")
+            )
+            trades = result.scalars().all()
+
+            trade_corrections = []
+            for trade in trades:
+                old = {
+                    "trade_id": trade.trade_id,
+                    "entry_spot": trade.entry_spot,
+                    "entry_vix": trade.entry_vix,
+                    "sell_strike": trade.sell_strike,
+                    "buy_strike": trade.buy_strike,
+                    "credit_received": trade.credit_received,
+                    "total_credit": trade.total_credit,
+                }
+
+                cfg = VERSION_CONFIGS.get(trade.version, {})
+                strike_cfg = {
+                    "BULL_OTM_SELL": BULL_OTM_SELL,
+                    "BULL_OTM_BUY": BULL_OTM_BUY,
+                    "IC_PUT_OTM_SELL": cfg.get("IC_PUT_OTM_SELL", 0.03),
+                    "IC_PUT_OTM_BUY": cfg.get("IC_PUT_OTM_BUY", 0.055),
+                    "IC_CALL_OTM_SELL": cfg.get("IC_CALL_OTM_SELL", 0.04),
+                    "IC_CALL_OTM_BUY": cfg.get("IC_CALL_OTM_BUY", 0.065),
+                    "BEAR_PUT_BUY_OTM": cfg.get("BEAR_PUT_BUY_OTM", 0.01),
+                    "BEAR_PUT_SELL_OTM": cfg.get("BEAR_PUT_SELL_OTM", 0.04),
+                    "BEAR_CALL_OTM_SELL": cfg.get("BEAR_CALL_OTM_SELL", 0.04),
+                    "BEAR_CALL_OTM_BUY": cfg.get("BEAR_CALL_OTM_BUY", 0.065),
+                }
+
+                new_strikes = select_strikes(correct_spot, trade.trade_type, strike_cfg)
+                T = compute_time_to_expiry_years(today, trade.expiry)
+
+                if trade.trade_type == "bull_put":
+                    new_credit = price_bull_put_spread(
+                        correct_spot, new_strikes["sell_strike"], new_strikes["buy_strike"],
+                        T, RISK_FREE_RATE, sigma, apply_slippage=True,
+                    )
+                elif trade.trade_type == "iron_condor":
+                    new_credit = price_iron_condor(
+                        correct_spot, new_strikes["sell_strike"], new_strikes["buy_strike"],
+                        new_strikes["ic_call_sell"], new_strikes["ic_call_buy"],
+                        T, RISK_FREE_RATE, sigma, apply_slippage=True,
+                    )
+                elif trade.trade_type == "bear_call":
+                    new_credit = price_bear_call_spread(
+                        correct_spot, new_strikes["ic_call_sell"], new_strikes["ic_call_buy"],
+                        T, RISK_FREE_RATE, sigma, apply_slippage=True,
+                    )
+                else:
+                    new_credit = trade.credit_received  # unchanged
+
+                new_total_credit = new_credit * trade.num_lots * NIFTY_LOT_SIZE
+
+                # Update the trade
+                trade.entry_spot = correct_spot
+                trade.entry_vix = correct_vix
+                trade.sell_strike = new_strikes["sell_strike"]
+                trade.buy_strike = new_strikes["buy_strike"]
+                trade.ic_call_sell = new_strikes.get("ic_call_sell")
+                trade.ic_call_buy = new_strikes.get("ic_call_buy")
+                trade.credit_received = new_credit
+                trade.total_credit = new_total_credit
+
+                trade_corrections.append({
+                    "trade_id": trade.trade_id,
+                    "old": old,
+                    "new": {
+                        "entry_spot": correct_spot,
+                        "entry_vix": correct_vix,
+                        "sell_strike": new_strikes["sell_strike"],
+                        "buy_strike": new_strikes["buy_strike"],
+                        "credit_received": round(new_credit, 4),
+                        "total_credit": round(new_total_credit, 2),
+                    },
+                })
+
+            # ── Fix predictions ──
+            result = await db.execute(
+                select(Prediction).where(Prediction.date == today)
+            )
+            predictions = result.scalars().all()
+
+            pred_corrections = []
+            for pred in predictions:
+                old_pred = {
+                    "version": pred.version,
+                    "nifty_spot": pred.nifty_spot,
+                    "vix": pred.vix,
+                    "signal_type": pred.signal_type,
+                }
+
+                pred.nifty_spot = correct_spot
+                pred.vix = correct_vix
+                # Remove * suffix if present (stale price flag)
+                if pred.signal_type.endswith("*"):
+                    pred.signal_type = pred.signal_type[:-1]
+
+                pred_corrections.append({
+                    "version": pred.version,
+                    "old": old_pred,
+                    "new": {
+                        "nifty_spot": correct_spot,
+                        "vix": correct_vix,
+                        "signal_type": pred.signal_type,
+                    },
+                })
+
+            await db.commit()
+
+            return {
+                "status": "corrected",
+                "correct_spot": correct_spot,
+                "correct_vix": correct_vix,
+                "trades_corrected": len(trade_corrections),
+                "predictions_corrected": len(pred_corrections),
+                "trade_details": trade_corrections,
+                "prediction_details": pred_corrections,
+            }
+
+    except Exception as e:
+        logger.error(f"Correct stale trades failed: {e}", exc_info=True)
+        import traceback
+        return {"status": "error", "message": str(e), "traceback": traceback.format_exc()}
