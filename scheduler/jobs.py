@@ -324,6 +324,9 @@ async def generate_daily_predictions():
             dhan_client, historical_df, option_chain
         )
 
+        # Track whether we have live prices (needed for trade opening)
+        has_live_spot = spot is not None
+
         # Fallback: use parquet data if live prices unavailable
         if spot is None:
             spot = features.get("nifty_close", 0)
@@ -391,11 +394,21 @@ async def generate_daily_predictions():
                     confidence = active_zone["distance_to_boundary"] if active_zone else 0
 
                     # Store prediction
+                    # If using fallback prices, append signal suffix so it's
+                    # visible in the DB that this prediction lacked live data.
+                    stored_signal = signal["signal"]
+                    if not has_live_spot:
+                        stored_signal = f"{signal['signal']}*"
+                        logger.warning(
+                            f"[{version}] Prediction stored with fallback prices "
+                            f"(spot={spot}, vix={vix}) — signal marked with *"
+                        )
+
                     pred = Prediction(
                         date=today_ist(),
                         timestamp=now_ist(),
                         predicted_drawdown=prediction_value,
-                        signal_type=signal["signal"],
+                        signal_type=stored_signal,
                         version=version,
                         nifty_spot=spot,
                         vix=vix,
@@ -410,7 +423,42 @@ async def generate_daily_predictions():
                 logger.info(f"Stored {len(ACTIVE_VERSIONS)} predictions")
 
                 # Open trades (in separate try-except so prediction storage is not affected)
+                # GUARD: Do NOT open trades if we don't have live spot prices.
+                # Stale parquet prices lead to wrong strikes, wrong entry_spot,
+                # and wrong entry_vix — and exit checks can't run without Dhan.
+                if not has_live_spot:
+                    logger.error(
+                        "TRADE OPENING BLOCKED — no live spot price from Dhan. "
+                        "Predictions stored but no trades opened. "
+                        "Renew Dhan token and trigger manually via POST /api/trigger-prediction."
+                    )
+                    await send_pipeline_failure_alert(
+                        pipeline_name="Trade Opening",
+                        error_msg=(
+                            "Predictions were generated but trades were NOT opened "
+                            "because Dhan API is down (no live spot price). "
+                            "Trades would have used stale parquet prices for strikes "
+                            "and entry, which is unreliable. "
+                            "Renew the Dhan token at web.dhan.co, update the env var, "
+                            "then POST /api/trigger-prediction to re-run with live prices."
+                        ),
+                        stage="open_trade_blocked_no_live_prices",
+                    )
+                    # Mark all versions as blocked
+                    for version in ACTIVE_VERSIONS:
+                        cfg = VERSION_CONFIGS[version]
+                        signal = map_signal(prediction_value, cfg)
+                        if signal["signal"] != "no_trade":
+                            blocked_versions.append({
+                                "version": version,
+                                "signal": signal["signal"],
+                                "reason": "no_live_spot",
+                            })
+
                 for version in ACTIVE_VERSIONS:
+                    if not has_live_spot:
+                        break  # Already handled above
+
                     cfg = VERSION_CONFIGS[version]
                     signal = map_signal(prediction_value, cfg)
 
