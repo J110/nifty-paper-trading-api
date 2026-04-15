@@ -1565,3 +1565,91 @@ async def correct_stale_trades(correct_spot: float, correct_vix: float):
         logger.error(f"Correct stale trades failed: {e}", exc_info=True)
         import traceback
         return {"status": "error", "message": str(e), "traceback": traceback.format_exc()}
+
+
+@app.post("/api/debug/reopen-trade")
+async def reopen_trade(trade_id: str):
+    """
+    Reopen a trade that was incorrectly closed (e.g. exit check ran against
+    stale entry data). Clears all exit fields and resets exit-tracking state
+    (peak_pnl_pct, trailing_stop_active, stop_loss counters) so the trade
+    resumes as if it was just opened with its current entry parameters.
+    """
+    from sqlalchemy import select
+    from db.database import async_session_factory
+    from db.models import Trade
+
+    try:
+        async with async_session_factory() as db:
+            result = await db.execute(
+                select(Trade).where(Trade.trade_id == trade_id)
+            )
+            trade = result.scalar_one_or_none()
+
+            if not trade:
+                return {"status": "not_found", "message": f"No trade: {trade_id}"}
+
+            if trade.status != "closed":
+                return {"status": "skipped", "message": f"Trade is already {trade.status}"}
+
+            old = {
+                "trade_id": trade.trade_id,
+                "status": trade.status,
+                "exit_date": str(trade.exit_date),
+                "exit_time": str(trade.exit_time),
+                "exit_spot": trade.exit_spot,
+                "exit_reason": trade.exit_reason,
+                "realized_pnl": trade.realized_pnl,
+                "current_pnl": trade.current_pnl,
+                "current_pnl_pct": trade.current_pnl_pct,
+                "peak_pnl_pct": trade.peak_pnl_pct,
+                "trailing_stop_active": trade.trailing_stop_active,
+                "stop_loss_breach_days": trade.stop_loss_breach_days,
+            }
+
+            # Clear exit fields
+            trade.status = "open"
+            trade.exit_date = None
+            trade.exit_time = None
+            trade.exit_spot = None
+            trade.exit_reason = None
+            trade.realized_pnl = None
+
+            # Reset PnL to zero (next exit check will recompute)
+            trade.current_pnl = 0
+            trade.current_pnl_pct = 0
+            trade.unrealized_pnl = 0
+            trade.current_spread_value = None
+
+            # Reset exit-tracking state that was corrupted by stale data
+            trade.peak_pnl_pct = 0.0
+            trade.trailing_stop_active = False
+            trade.stop_loss_breach_days = 0
+            trade.stop_loss_last_breach_date = None
+
+            await db.commit()
+
+            return {
+                "status": "reopened",
+                "trade_id": trade_id,
+                "old": old,
+                "new": {
+                    "status": "open",
+                    "exit_date": None,
+                    "exit_reason": None,
+                    "realized_pnl": None,
+                    "peak_pnl_pct": 0.0,
+                    "trailing_stop_active": False,
+                    "stop_loss_breach_days": 0,
+                    "entry_spot": trade.entry_spot,
+                    "entry_vix": trade.entry_vix,
+                    "sell_strike": trade.sell_strike,
+                    "buy_strike": trade.buy_strike,
+                    "credit_received": trade.credit_received,
+                },
+            }
+
+    except Exception as e:
+        logger.error(f"Reopen trade failed for {trade_id}: {e}", exc_info=True)
+        import traceback
+        return {"status": "error", "message": str(e), "traceback": traceback.format_exc()}
