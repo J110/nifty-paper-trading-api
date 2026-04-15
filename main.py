@@ -1408,9 +1408,10 @@ async def correct_stale_trades(correct_spot: float, correct_vix: float):
 
     try:
         async with async_session_factory() as db:
-            # ── Fix trades ──
+            # ── Fix trades (both open AND closed from today) ──
+            from core.option_pricer import compute_spread_value
             result = await db.execute(
-                select(Trade).where(Trade.entry_date == today, Trade.status == "open")
+                select(Trade).where(Trade.entry_date == today)
             )
             trades = result.scalars().all()
 
@@ -1418,12 +1419,16 @@ async def correct_stale_trades(correct_spot: float, correct_vix: float):
             for trade in trades:
                 old = {
                     "trade_id": trade.trade_id,
+                    "status": trade.status,
                     "entry_spot": trade.entry_spot,
                     "entry_vix": trade.entry_vix,
                     "sell_strike": trade.sell_strike,
                     "buy_strike": trade.buy_strike,
                     "credit_received": trade.credit_received,
                     "total_credit": trade.total_credit,
+                    "realized_pnl": trade.realized_pnl,
+                    "current_pnl": trade.current_pnl,
+                    "current_pnl_pct": trade.current_pnl_pct,
                 }
 
                 cfg = VERSION_CONFIGS.get(trade.version, {})
@@ -1441,30 +1446,30 @@ async def correct_stale_trades(correct_spot: float, correct_vix: float):
                 }
 
                 new_strikes = select_strikes(correct_spot, trade.trade_type, strike_cfg)
-                T = compute_time_to_expiry_years(today, trade.expiry)
+                T_entry = compute_time_to_expiry_years(today, trade.expiry)
 
                 if trade.trade_type == "bull_put":
                     new_credit = price_bull_put_spread(
                         correct_spot, new_strikes["sell_strike"], new_strikes["buy_strike"],
-                        T, RISK_FREE_RATE, sigma, apply_slippage=True,
+                        T_entry, RISK_FREE_RATE, sigma, apply_slippage=True,
                     )
                 elif trade.trade_type == "iron_condor":
                     new_credit = price_iron_condor(
                         correct_spot, new_strikes["sell_strike"], new_strikes["buy_strike"],
                         new_strikes["ic_call_sell"], new_strikes["ic_call_buy"],
-                        T, RISK_FREE_RATE, sigma, apply_slippage=True,
+                        T_entry, RISK_FREE_RATE, sigma, apply_slippage=True,
                     )
                 elif trade.trade_type == "bear_call":
                     new_credit = price_bear_call_spread(
                         correct_spot, new_strikes["ic_call_sell"], new_strikes["ic_call_buy"],
-                        T, RISK_FREE_RATE, sigma, apply_slippage=True,
+                        T_entry, RISK_FREE_RATE, sigma, apply_slippage=True,
                     )
                 else:
-                    new_credit = trade.credit_received  # unchanged
+                    new_credit = trade.credit_received
 
                 new_total_credit = new_credit * trade.num_lots * NIFTY_LOT_SIZE
 
-                # Update the trade
+                # Update entry fields
                 trade.entry_spot = correct_spot
                 trade.entry_vix = correct_vix
                 trade.sell_strike = new_strikes["sell_strike"]
@@ -1474,17 +1479,43 @@ async def correct_stale_trades(correct_spot: float, correct_vix: float):
                 trade.credit_received = new_credit
                 trade.total_credit = new_total_credit
 
+                new_info = {
+                    "entry_spot": correct_spot,
+                    "entry_vix": correct_vix,
+                    "sell_strike": new_strikes["sell_strike"],
+                    "buy_strike": new_strikes["buy_strike"],
+                    "credit_received": round(new_credit, 4),
+                    "total_credit": round(new_total_credit, 2),
+                }
+
+                # For closed trades, also recompute exit PnL
+                if trade.status == "closed" and trade.exit_spot:
+                    T_exit = max((trade.expiry - today).days / 365.0, 1 / 365.0)
+                    exit_value = compute_spread_value(
+                        trade.trade_type, trade.exit_spot,
+                        new_strikes["sell_strike"], new_strikes["buy_strike"],
+                        new_strikes.get("ic_call_sell"), new_strikes.get("ic_call_buy"),
+                        T_exit, RISK_FREE_RATE, sigma,
+                    )
+                    new_realized = (new_credit - exit_value) * trade.num_lots * NIFTY_LOT_SIZE
+                    new_pnl_pct = (
+                        new_realized / trade.capital_deployed * 100
+                        if trade.capital_deployed > 0 else 0
+                    )
+                    trade.realized_pnl = new_realized
+                    trade.current_pnl = new_realized
+                    trade.current_pnl_pct = new_pnl_pct
+                    trade.unrealized_pnl = 0.0
+                    new_info.update({
+                        "exit_value": round(exit_value, 4),
+                        "realized_pnl": round(new_realized, 2),
+                        "current_pnl_pct": round(new_pnl_pct, 4),
+                    })
+
                 trade_corrections.append({
                     "trade_id": trade.trade_id,
                     "old": old,
-                    "new": {
-                        "entry_spot": correct_spot,
-                        "entry_vix": correct_vix,
-                        "sell_strike": new_strikes["sell_strike"],
-                        "buy_strike": new_strikes["buy_strike"],
-                        "credit_received": round(new_credit, 4),
-                        "total_credit": round(new_total_credit, 2),
-                    },
+                    "new": new_info,
                 })
 
             # ── Fix predictions ──
