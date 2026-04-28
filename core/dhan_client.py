@@ -254,7 +254,9 @@ class DhanClient:
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-                resp = await client.post(url, headers=headers)
+                # NB: RenewToken is GET, not POST — Dhan's web docs are wrong
+                # but the official Python SDK confirms GET (DhanHQ-py auth.py).
+                resp = await client.get(url, headers=headers)
                 logger.info("RenewToken response: %s %s", resp.status_code, resp.text[:300])
         except httpx.RequestError as exc:
             logger.error("Network error on RenewToken: %s", exc)
