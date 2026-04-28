@@ -276,9 +276,11 @@ class DhanClient:
         except ValueError as exc:
             raise DhanAPIError("Invalid JSON in RenewToken response") from exc
 
-        new_token = data.get("accessToken")
+        # Dhan returns the new JWT under "token"; older docs/SDK called it
+        # "accessToken" — accept either to be defensive.
+        new_token = data.get("token") or data.get("accessToken")
         if not new_token:
-            raise DhanAPIError(f"No accessToken in renewal response: {data}")
+            raise DhanAPIError(f"No token in renewal response: {data}")
 
         # Update in-memory headers for this client and the httpx session
         self._headers["access-token"] = new_token
