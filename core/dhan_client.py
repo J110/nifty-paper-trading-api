@@ -6,14 +6,19 @@ and typed return values for all market-data endpoints.
 """
 
 import asyncio
+import base64
+import json
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
 from core.timezone import now_ist
 from config import DHAN_ACCESS_TOKEN, DHAN_CLIENT_ID, DHAN_API_BASE
+
+# Key under which the auto-renewed token lives in the system_config table.
+TOKEN_CONFIG_KEY = "dhan_access_token"
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,21 @@ _RATE_LIMIT_SECONDS = 0.10
 # Client
 # ---------------------------------------------------------------------------
 
+def _decode_jwt_exp(token: str) -> datetime | None:
+    """Return the JWT's `exp` claim as a tz-aware UTC datetime, or None if unparseable."""
+    try:
+        payload_b64 = token.split(".")[1]
+        # JWT base64 is URL-safe and unpadded
+        padding = "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64 + padding))
+        exp = payload.get("exp")
+        if exp is None:
+            return None
+        return datetime.fromtimestamp(int(exp), tz=timezone.utc)
+    except Exception:
+        return None
+
+
 class DhanClient:
     """Async wrapper around the Dhan v2 REST API."""
 
@@ -58,11 +78,62 @@ class DhanClient:
         self._client: httpx.AsyncClient | None = None
         self._last_request_ts: float = 0.0
 
+    # -- token persistence ---------------------------------------------------
+
+    @staticmethod
+    async def _load_token_from_db() -> str | None:
+        """Return the most recent auto-renewed token from the DB, or None."""
+        try:
+            from db.database import async_session_factory
+            from db.models import SystemConfig
+            from sqlalchemy import select
+
+            async with async_session_factory() as session:
+                row = await session.get(SystemConfig, TOKEN_CONFIG_KEY)
+                return row.value if row else None
+        except Exception as exc:
+            logger.warning("Could not load Dhan token from DB: %s", exc)
+            return None
+
+    @staticmethod
+    async def _save_token_to_db(token: str) -> None:
+        """Upsert the renewed token into system_config."""
+        from db.database import async_session_factory
+        from db.models import SystemConfig
+
+        async with async_session_factory() as session:
+            row = await session.get(SystemConfig, TOKEN_CONFIG_KEY)
+            if row is None:
+                session.add(SystemConfig(key=TOKEN_CONFIG_KEY, value=token))
+            else:
+                row.value = token
+            await session.commit()
+
+    def token_expiry(self) -> datetime | None:
+        """Return the active token's UTC expiry datetime, or None if unparseable."""
+        return _decode_jwt_exp(self._headers["access-token"])
+
     # -- lifecycle -----------------------------------------------------------
 
     async def start(self) -> None:
-        """Create the underlying httpx session."""
+        """Create the underlying httpx session.
+
+        Prefers the DB-stored token (auto-renewed by the scheduler) over
+        the env-var bootstrap token, but only if the DB token is fresher.
+        """
         if self._client is None or self._client.is_closed:
+            db_token = await self._load_token_from_db()
+            if db_token:
+                env_exp = _decode_jwt_exp(self._headers["access-token"])
+                db_exp = _decode_jwt_exp(db_token)
+                # Use DB token if it parses and is at least as fresh as env var.
+                if db_exp and (env_exp is None or db_exp >= env_exp):
+                    self._headers["access-token"] = db_token
+                    logger.info(
+                        "Loaded Dhan token from DB (expires %s UTC)",
+                        db_exp.isoformat(),
+                    )
+
             self._client = httpx.AsyncClient(
                 base_url=self._base,
                 headers=self._headers,
@@ -165,14 +236,11 @@ class DhanClient:
 
     async def renew_token(self) -> dict:
         """
-        Attempt to renew the Dhan access token for another 24 hours.
+        Renew the Dhan access token for another 24 hours and persist it
+        to the system_config table so it survives Render restarts.
 
-        NOTE: As of Feb 2026, Dhan's RenewToken endpoint appears to not work
-        for API portal-generated tokens (DH-905/DH-906 errors). The scheduled
-        renewal job will log this failure gracefully. The pipeline still works
-        without token renewal — it falls back to parquet data.
-
-        If Dhan fixes this in the future, this method is ready to go.
+        Only works for tokens generated from web.dhan.co (not the API
+        portal — those return DH-905/DH-906).
         """
         await self._throttle()
 
@@ -215,7 +283,18 @@ class DhanClient:
         if self._client and not self._client.is_closed:
             self._client.headers["access-token"] = new_token
 
-        expiry = data.get("expiryTime", "unknown")
+        # Persist to DB so the renewed token survives the next Render restart.
+        try:
+            await self._save_token_to_db(new_token)
+        except Exception as exc:
+            logger.error("Failed to persist renewed token to DB: %s", exc)
+            # Don't raise — the in-memory token still works for this process.
+
+        expiry = data.get("expiryTime") or (
+            _decode_jwt_exp(new_token).isoformat()
+            if _decode_jwt_exp(new_token)
+            else "unknown"
+        )
         logger.info("Dhan token renewed successfully — expires %s", expiry)
 
         return data

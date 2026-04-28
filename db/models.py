@@ -184,7 +184,21 @@ class DailyFeature(Base):
 
 
 # ------------------------------------------------------------------
-# 6. DailyPnl
+# 6. SystemConfig — durable key/value for runtime secrets like the
+#    auto-renewed Dhan access token. Survives Render redeploys.
+# ------------------------------------------------------------------
+class SystemConfig(Base):
+    __tablename__ = "system_config"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+# ------------------------------------------------------------------
+# 7. DailyPnl
 # ------------------------------------------------------------------
 class DailyPnl(Base):
     __tablename__ = "daily_pnl"

@@ -128,6 +128,16 @@ async def health_check():
     scheduler_running = scheduler is not None and scheduler.running
     overall_healthy = db_healthy and scheduler_running
 
+    # Surface Dhan token expiry so we can spot stale tokens before they break trades.
+    from datetime import datetime
+    from scheduler.jobs import dhan_client
+    token_exp = dhan_client.token_expiry()
+    token_exp_iso = token_exp.isoformat() if token_exp else None
+    token_hours_left = (
+        round((token_exp - datetime.now(token_exp.tzinfo)).total_seconds() / 3600, 1)
+        if token_exp else None
+    )
+
     return {
         "status": "healthy" if overall_healthy else "degraded",
         "service": "nifty-paper-trading-api",
@@ -137,6 +147,8 @@ async def health_check():
         "scheduler_running": scheduler_running,
         "today_predictions": today_predictions,
         "last_prediction_date": last_prediction_date.isoformat() if last_prediction_date else None,
+        "dhan_token_expiry_utc": token_exp_iso,
+        "dhan_token_hours_left": token_hours_left,
         "server_time_ist": now_ist().isoformat(),
     }
 

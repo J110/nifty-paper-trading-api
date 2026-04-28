@@ -109,8 +109,45 @@ def setup_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    logger.info("Scheduler configured with all jobs (data→predictions→exits→eod)")
+    # 5. Auto-renew Dhan access token twice daily (06:00 + 18:00 IST).
+    #    Two attempts/day means one failure can't expire the token before
+    #    the next try. Runs every day (incl. weekends) since the token
+    #    itself expires daily regardless of market hours.
+    scheduler.add_job(
+        renew_dhan_token,
+        CronTrigger(
+            hour="6,18", minute=0,
+            timezone="Asia/Kolkata",
+        ),
+        id="dhan_token_renewal",
+        replace_existing=True,
+    )
+
+    logger.info("Scheduler configured with all jobs (data→predictions→exits→eod→token)")
     return scheduler
+
+
+async def renew_dhan_token():
+    """Scheduled job: renew the Dhan access token and persist it to DB.
+
+    On failure, sends a pipeline-failure alert so the user can manually
+    regenerate before the current token expires.
+    """
+    logger.info("=== Starting Dhan token renewal ===")
+    try:
+        result = await dhan_client.renew_token()
+        expiry = result.get("expiryTime", "unknown")
+        logger.info(f"Dhan token renewal SUCCESS — new expiry {expiry}")
+    except Exception as exc:
+        logger.error(f"Dhan token renewal FAILED: {exc}", exc_info=True)
+        try:
+            await send_pipeline_failure_alert(
+                pipeline_name="dhan_token_renewal",
+                error_msg=str(exc),
+                stage="renew_token",
+            )
+        except Exception as alert_exc:
+            logger.error(f"Could not send token-renewal alert: {alert_exc}")
 
 
 async def run_data_update():
