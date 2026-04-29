@@ -41,6 +41,17 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized")
 
+    # Eagerly initialize DhanClient so the DB-backed token (which may
+    # be fresher than the bootstrap env var) is loaded into memory now,
+    # rather than lazily on the first market-data call. Without this,
+    # /health and the 06:00/18:00 renewal cron see stale env-var data
+    # immediately after a redeploy.
+    from scheduler.jobs import dhan_client
+    try:
+        await dhan_client.start()
+    except Exception as exc:
+        logger.error(f"Eager DhanClient.start() failed: {exc}")
+
     # Start scheduler
     scheduler = setup_scheduler()
     scheduler.start()

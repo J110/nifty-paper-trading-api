@@ -243,6 +243,13 @@ class DhanClient:
         Only works for tokens generated from web.dhan.co (not the API
         portal — those return DH-905/DH-906).
         """
+        # Ensure the DB-backed token has been loaded into self._headers
+        # before we attempt renewal. Without this, the 06:00/18:00 cron
+        # could renew using a stale env-var token if no other Dhan call
+        # had triggered start() since the last process restart.
+        if self._client is None or self._client.is_closed:
+            await self.start()
+
         await self._throttle()
 
         url = f"{self._base}/RenewToken"
