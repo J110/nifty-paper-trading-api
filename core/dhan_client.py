@@ -138,6 +138,7 @@ class DhanClient:
                 base_url=self._base,
                 headers=self._headers,
                 timeout=httpx.Timeout(30.0),
+                follow_redirects=True,  # Dhan occasionally 301s; don't parse HTML as JSON.
             )
             logger.info("DhanClient session opened (%s)", self._base)
 
@@ -253,11 +254,22 @@ class DhanClient:
         logger.info("Attempting token renewal at %s", url)
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            # follow_redirects=True: Dhan started returning 301 on /v2/RenewToken
+            # (seen 2026-04-29). Without this httpx returns the redirect HTML
+            # which we then fail to parse as JSON.
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0),
+                follow_redirects=True,
+            ) as client:
                 # NB: RenewToken is GET, not POST — Dhan's web docs are wrong
                 # but the official Python SDK confirms GET (DhanHQ-py auth.py).
                 resp = await client.get(url, headers=headers)
-                logger.info("RenewToken response: %s %s", resp.status_code, resp.text[:300])
+                logger.info(
+                    "RenewToken response: %s (final URL %s) %s",
+                    resp.status_code,
+                    resp.url,
+                    resp.text[:300],
+                )
         except httpx.RequestError as exc:
             logger.error("Network error on RenewToken: %s", exc)
             raise DhanAPIError(f"Network error during token renewal: {exc}") from exc
