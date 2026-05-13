@@ -301,6 +301,11 @@ async def check_and_recover_missed_prediction():
 
 async def record_price_snapshot():
     """Record Nifty spot + VIX snapshot every 15 minutes."""
+    # Skip pre-open ticks (9:00-9:14 IST): Dhan's /marketfeed/ltp returns
+    # an empty IDX_I payload for the Nifty index before 9:15, so the call
+    # would silently produce a None and a useless log line.
+    if now_ist().time() < dtime(9, 15):
+        return
     try:
         spot = await dhan_client.get_nifty_ltp()
         vix = await dhan_client.get_india_vix()
@@ -650,6 +655,12 @@ async def check_all_exits():
     # Skip on market holidays — Dhan won't return prices
     if today_ist() in _NSE_HOLIDAYS:
         logger.debug("Exit check skipped — market holiday")
+        return
+
+    # Skip pre-open window (9:00-9:14 IST): Dhan's IDX_I feed is empty
+    # before 9:15 and yesterday's snapshot is past the 8h staleness guard,
+    # so the spot-fetch would falsely fire a pipeline_failure alert.
+    if now_ist().time() < dtime(9, 15):
         return
 
     try:
