@@ -139,7 +139,12 @@ VERSION_CONFIGS = {
         "IC_POSITION_SIZE_PCT": 0.20,
         "MAX_CONCURRENT_POSITIONS": 3,
         "IC_MAX_CONCURRENT": 3,
-        "MIN_ENTRY_GAP_DAYS": 2,
+        # Gap relaxed to 1 (vs 2 on v5.4.2/4) — Mar–May 2026 analysis showed
+        # 17/42 trading days were skipped purely by the 2-day gap, with skipped-
+        # day conditions statistically identical to taken-day ones (~84% win
+        # rate would apply). 5-min exits mean v5.4.3 can react fast if a
+        # crash starts mid-week, so it's the safest version to test this on.
+        "MIN_ENTRY_GAP_DAYS": 1,
 
         # Exits (same as v5.4.2 except tighter trail — with 5-min polling we can
         # lock in more of peak P&L without whipsaw risk).
