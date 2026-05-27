@@ -20,6 +20,7 @@ from config import (
     MARGIN_PER_LOT_BULL, MARGIN_PER_LOT_IC, MARGIN_PER_LOT_BEAR,
     VERSION_CONFIGS,
     BULL_OTM_SELL, BULL_OTM_BUY,
+    MIN_TOTAL_CREDIT, MIN_ENTRY_DTE,
 )
 from core.option_pricer import (
     select_strikes, price_bull_put_spread, price_iron_condor,
@@ -174,6 +175,21 @@ class TradeManager:
             entry_mode = "normal"
             if cfg.get("VIX_HARVEST_ENABLED") and vix and vix >= cfg.get("VIX_HARVEST_TRIGGER", 23):
                 entry_mode = "vix_harvest"
+
+        # Entry quality filter: skip trades where the premium offered is too small
+        # relative to the max loss exposure. Empirically (Mar–May 2026) the 9 trades
+        # opened on Wednesdays for next-day Thursday expiry had total credit
+        # ₹12–₹1970 and net P&L −₹6.7K — small wins offset by two max-loss expiries.
+        # Same filter expressed as DTE catches the same trades.
+        dte_at_entry = (expiry - today_ist()).days
+        if not is_bear_debit:
+            if total_credit < MIN_TOTAL_CREDIT or dte_at_entry < MIN_ENTRY_DTE:
+                logger.info(
+                    f"[{version}] Skipping low-quality entry: "
+                    f"total_credit=₹{total_credit:.0f} (min ₹{MIN_TOTAL_CREDIT}), "
+                    f"DTE={dte_at_entry} (min {MIN_ENTRY_DTE})"
+                )
+                return None
 
         # Create trade ID
         trade_id = f"{version.replace('.', '')}-{today_ist().isoformat()}-{signal['signal']}"
@@ -368,6 +384,14 @@ class TradeManager:
         sl_mult = cfg.get("STOP_LOSS_MULTIPLIER", 3.0)
         if trade.trade_type == "iron_condor":
             sl_mult = cfg.get("IC_STOP_LOSS_MULTIPLIER", 3.0)
+
+        # Profit-arming gate (v5.4.4+): if configured, use a looser pre-armed
+        # multiplier until the trade has shown ARMING_PCT profit. The tight
+        # stop is meant to protect *gained* profit, not punish unlucky opens
+        # where the trade may still mean-revert.
+        arming_pct = cfg.get("STOP_LOSS_ARMING_PCT")
+        if arming_pct is not None and (trade.peak_pnl_pct or 0.0) < arming_pct:
+            sl_mult = cfg.get("STOP_LOSS_ARMING_MULT", 3.0)
 
         confirm_days = cfg.get("STOP_LOSS_CONFIRM_DAYS", 2)
         if trade.trade_type == "iron_condor":

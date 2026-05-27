@@ -76,6 +76,11 @@ DRAWDOWN_NO_TRADE = -0.065      # < -6.5%: no trade
 VIX_MIN_ENTRY = 8
 VIX_MAX_ENTRY = 25
 
+# Credit/DTE quality floor for credit trades (skip nano-credit Wednesday entries
+# that have 50:1-against risk:reward at entry).
+MIN_TOTAL_CREDIT = 2000     # ₹ — skip credit trades with total credit below this
+MIN_ENTRY_DTE = 2           # skip credit trades opened with ≤1 day to expiry
+
 # ============================================================
 # Version Profiles
 # ============================================================
@@ -136,7 +141,8 @@ VERSION_CONFIGS = {
         "IC_MAX_CONCURRENT": 3,
         "MIN_ENTRY_GAP_DAYS": 2,
 
-        # Exits (same as v5.4.2)
+        # Exits (same as v5.4.2 except tighter trail — with 5-min polling we can
+        # lock in more of peak P&L without whipsaw risk).
         "PROFIT_TARGET_EARLY": 0.50,
         "PROFIT_TARGET_MID": 0.65,
         "PROFIT_TARGET_LATE": 0.80,
@@ -144,8 +150,8 @@ VERSION_CONFIGS = {
         "STOP_LOSS_CONFIRM_DAYS": 2,
         "IC_STOP_LOSS_MULTIPLIER": 3.0,
         "IC_STOP_LOSS_CONFIRM_DAYS": 2,
-        "TRAILING_STOP_ACTIVATE": 0.40,
-        "TRAILING_STOP_LEVEL": 0.10,
+        "TRAILING_STOP_ACTIVATE": 0.50,
+        "TRAILING_STOP_LEVEL": 0.05,
         "MIN_DTE_EXIT": 1,
         "VIX_SPIKE_EXIT": 25,
 
@@ -179,22 +185,30 @@ VERSION_CONFIGS = {
         "IC_MAX_CONCURRENT": 3,
         "MIN_ENTRY_GAP_DAYS": 2,
 
-        # Exits: same as v5.4.3 (tighter risk)
+        # Exits: tighter risk than v5.4.2/3, but with two guards:
+        #   - 2-day confirm (was 1) so a single ugly close doesn't lock in the bottom
+        #   - STOP_LOSS_ARMING_PCT: until the trade has earned ARMING_PCT in profit,
+        #     fall back to the looser v5.4.2 stop (3.0×). The tight 2.5× stop is
+        #     meant to protect *gained* profit, not punish an unlucky open.
         "PROFIT_TARGET_EARLY": 0.45,
         "PROFIT_TARGET_MID": 0.60,
         "PROFIT_TARGET_LATE": 0.75,
         "STOP_LOSS_MULTIPLIER": 2.5,
-        "STOP_LOSS_CONFIRM_DAYS": 1,
+        "STOP_LOSS_CONFIRM_DAYS": 2,
         "IC_STOP_LOSS_MULTIPLIER": 2.5,
-        "IC_STOP_LOSS_CONFIRM_DAYS": 1,
+        "IC_STOP_LOSS_CONFIRM_DAYS": 2,
+        "STOP_LOSS_ARMING_PCT": 0.10,        # trade must reach +10% before tight stop arms
+        "STOP_LOSS_ARMING_MULT": 3.0,         # pre-arming multiplier (matches v5.4.2)
         "TRAILING_STOP_ACTIVATE": 0.45,
         "TRAILING_STOP_LEVEL": 0.15,
         "MIN_DTE_EXIT": 1,
 
-        # Signal mapping type
-        "SIGNAL_MAPPING": "graduated_gentle",  # 0.8x floor, ±0.25% transitions
+        # Signal mapping type — narrower transition (HW 0.25→0.10) so borderline
+        # predictions like -3.86% size as bull_half (not bull_full), matching the
+        # sharp mapping's behavior on the boundary.
+        "SIGNAL_MAPPING": "graduated_gentle",
         "GRADUATED_FLOOR": 0.80,
-        "GRADUATED_HW": 0.25,
+        "GRADUATED_HW": 0.10,
 
         # Advanced features: same entry params as v5.4.2
         "IC_CALL_OTM_SELL": 0.04,

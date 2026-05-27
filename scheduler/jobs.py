@@ -97,7 +97,23 @@ def setup_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    # 4. EOD processing at 3:35 PM IST
+    # 4. Midday profit-target check for v5.4.2 at 12:30 IST.
+    #    v5.4.2's hybrid exits only run profit-target/trailing checks at EOD.
+    #    Empirically (May 8 2026) this missed the PT on a trade that compressed
+    #    fast in the morning and then blew up that afternoon. One midday full-
+    #    check rescues those cases without making v5.4.2 act like v5.4.3.
+    scheduler.add_job(
+        check_v542_midday_pt,
+        CronTrigger(
+            day_of_week="mon-fri",
+            hour=12, minute=30,
+            timezone="Asia/Kolkata",
+        ),
+        id="v542_midday_pt",
+        replace_existing=True,
+    )
+
+    # 5. EOD processing at 3:35 PM IST
     scheduler.add_job(
         eod_processing,
         CronTrigger(
@@ -109,7 +125,7 @@ def setup_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    # 5. Auto-renew Dhan access token twice daily (06:00 + 18:00 IST).
+    # 6. Auto-renew Dhan access token twice daily (06:00 + 18:00 IST).
     #    Two attempts/day means one failure can't expire the token before
     #    the next try. Runs every day (incl. weekends) since the token
     #    itself expires daily regardless of market hours.
@@ -721,6 +737,61 @@ async def check_all_exits():
             )
         except Exception:
             pass
+
+
+async def check_v542_midday_pt():
+    """
+    Midday profit-target / trailing check for v5.4.2 (hybrid exits).
+
+    v5.4.2 runs `loss_only=True` in the every-5-min check (intraday only sees
+    stop losses), with profit-target and trailing fired at EOD. That misses
+    cases where the spread compresses fast in the morning and then expands
+    again in the afternoon — the May 8 2026 trade is the canonical example.
+    Running ONE full check at 12:30 IST catches those without making v5.4.2
+    fully 5-min-driven (which would defeat the point of keeping the hybrid
+    variant distinct from v5.4.3).
+    """
+    if today_ist() in _NSE_HOLIDAYS:
+        logger.debug("v5.4.2 midday PT check skipped — market holiday")
+        return
+
+    try:
+        async with async_session_factory() as db:
+            spot, vix, source = await _get_spot_vix_with_fallback(db)
+
+        if spot is None:
+            logger.error("v5.4.2 midday PT check skipped — no spot price available")
+            return
+
+        if source == "snapshot_fallback":
+            logger.warning("v5.4.2 midday PT check using snapshot fallback")
+
+        async with async_session_factory() as db:
+            closed_trades = await trade_manager.check_exits(
+                "v5.4.2", spot, vix, db, loss_only=False, is_eod=False
+            )
+            if closed_trades:
+                for ct in closed_trades:
+                    try:
+                        await send_exit_alert(
+                            version="v5.4.2",
+                            trade_id=ct["trade_id"],
+                            exit_reason=ct["exit_reason"],
+                            trade_type=ct["trade_type"],
+                            entry_spot=ct["entry_spot"],
+                            exit_spot=spot,
+                            realized_pnl=ct["realized_pnl"],
+                            pnl_pct=ct["pnl_pct"],
+                            sell_strike=ct["sell_strike"],
+                            buy_strike=ct["buy_strike"],
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to send v5.4.2 midday exit alert for {ct['trade_id']}: {e}"
+                        )
+
+    except Exception as e:
+        logger.error(f"v5.4.2 midday PT check failed: {e}", exc_info=True)
 
 
 async def eod_processing():
