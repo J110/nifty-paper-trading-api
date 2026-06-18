@@ -101,10 +101,17 @@ def sharpe_ratio(returns, risk_free_daily=0.07 / 252):
 
 
 def find_next_weekly_expiry(date):
-    """Find the next Thursday (weekly Nifty expiry).
-    If today is Thursday, use next Thursday (don't enter on expiry day)."""
+    """Find the next weekly Nifty expiry.
+
+    NSE moved Nifty's weekly expiry from Thursday to Tuesday effective 2025-09-01,
+    so use Tuesday (weekday 1) on/after the cutover and Thursday (3) before it. If
+    *date* is the expiry day itself, roll to next week (don't enter on expiry day).
+    NOTE: weekday-only (no holiday roll-back) — matches this module's original
+    behaviour; the historical backtest did not holiday-adjust weekly expiries.
+    """
     date = pd.Timestamp(date)
-    days_ahead = 3 - date.weekday()  # Thursday = 3
+    target = 1 if date >= pd.Timestamp("2025-09-01") else 3  # Tue on/after cutover, else Thu
+    days_ahead = target - date.weekday()
     if days_ahead <= 0:
         days_ahead += 7
     return date + timedelta(days=days_ahead)
