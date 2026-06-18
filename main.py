@@ -1183,7 +1183,7 @@ async def debug_test_real_pricing():
         get_next_weekly_expiry, select_strikes, price_iron_condor,
         compute_time_to_expiry_years,
     )
-    from core.real_option_pricer import parse_chain, price_spread_real
+    from core.real_option_pricer import parse_chain, price_spread_real, value_spread_real
     from core.timezone import today_ist
     from config import RISK_FREE_RATE
     from scheduler.jobs import dhan_client
@@ -1204,6 +1204,10 @@ async def debug_test_real_pricing():
                                strikes["ic_call_sell"], strikes["ic_call_buy"],
                                T, RISK_FREE_RATE, vix / 100.0, apply_slippage=True)
         pricing = price_spread_real(chain, "iron_condor", strikes, bs)
+        exit_val = value_spread_real(chain, "iron_condor", strikes, bs)
+        immediate_pnl = None
+        if pricing.get("source", "").startswith("real") and exit_val.get("source", "").startswith("real"):
+            immediate_pnl = round((pricing["real_credit"] or 0) - (exit_val["real_value"] or 0), 2)
         sample = None
         if not parsed:
             oc = data.get("oc") or data.get("option_chain") or {}
@@ -1212,7 +1216,8 @@ async def debug_test_real_pricing():
         return {
             "expiry": expiry.isoformat(), "spot": spot, "vix": vix,
             "strikes": strikes, "parsed_strikes": len(parsed),
-            "pricing": pricing, "raw_sample_if_unparsed": sample,
+            "entry_pricing": pricing, "exit_pricing": exit_val,
+            "immediate_pnl_per_unit": immediate_pnl, "raw_sample_if_unparsed": sample,
         }
     except Exception as e:
         return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}

@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # Global instances (initialized on startup)
 dhan_client = DhanClient()
 model_runner = ModelRunner(DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH)
-trade_manager = TradeManager()
+trade_manager = TradeManager(dhan_client=dhan_client)
 price_tracker = PriceTracker()
 
 

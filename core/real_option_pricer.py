@@ -170,6 +170,56 @@ def price_spread_real(chain_response: dict, trade_type: str, strikes: dict,
     return result
 
 
+def value_spread_real(chain_response: dict, trade_type: str, strikes: dict,
+                      bs_value: float, *, allow_ltp_fallback: bool = True) -> dict:
+    """
+    Real cost-to-CLOSE the spread (the exit/MTM value) — the mirror of entry:
+    you BUY BACK the short legs at the ask and SELL the long legs at the bid.
+
+    Cost = Σ(short-leg ask) − Σ(long-leg bid). Using the same basis as the real
+    entry credit means a freshly-opened trade shows only the round-trip bid/ask
+    spread as a loss (realistic), not a synthetic BS mis-mark. Falls back to
+    *bs_value* (flagged) when any leg has no usable quote.
+    """
+    result = {
+        "value": bs_value, "source": "bs_fallback", "fallback_reason": None,
+        "real_value": None, "bs_value": round(bs_value, 2), "legs": [],
+    }
+    legs = _SPREAD_LEGS.get(trade_type)
+    if not legs:
+        result["fallback_reason"] = f"unsupported_trade_type:{trade_type}"
+        return result
+    parsed = parse_chain(chain_response)
+    if not parsed:
+        result["fallback_reason"] = "chain_unavailable_or_unparseable"
+        return result
+
+    cost = 0.0
+    used_ltp = False
+    leg_detail = []
+    for opt, entry_action, key in legs:
+        strike = strikes.get(key)
+        if strike is None:
+            result["fallback_reason"] = f"missing_strike:{key}"
+            return result
+        # Closing is the opposite of entry: short→buy back (ask), long→sell (bid).
+        exit_action = "buy" if entry_action == "sell" else "sell"
+        px, src = _leg_fill_price(parsed, float(strike), opt, exit_action, allow_ltp_fallback)
+        if px is None:
+            result["fallback_reason"] = src
+            return result
+        if src == "ltp":
+            used_ltp = True
+        cost += px if exit_action == "buy" else -px
+        leg_detail.append({"opt": opt, "action": exit_action, "strike": float(strike),
+                           "price": round(px, 2), "px_source": src})
+
+    real_value = max(cost, 0.0)
+    result.update(value=real_value, source="real_ltp" if used_ltp else "real",
+                  real_value=round(real_value, 2), legs=leg_detail)
+    return result
+
+
 def log_pricing(version: str, trade_type: str, pricing: dict) -> None:
     """Emit a HIGHLIGHTED log line — loud on BS fallback, plain on real."""
     src = pricing.get("source")

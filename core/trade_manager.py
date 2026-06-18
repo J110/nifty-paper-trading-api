@@ -28,7 +28,7 @@ from core.option_pricer import (
     get_next_weekly_expiry, compute_time_to_expiry_years,
     compute_spread_value,
 )
-from core.real_option_pricer import price_spread_real, log_pricing
+from core.real_option_pricer import price_spread_real, value_spread_real, log_pricing
 from db.models import Trade, DailyPnl, Prediction
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,28 @@ logger = logging.getLogger(__name__)
 
 class TradeManager:
     """Manages paper trade lifecycle for all versions."""
+
+    def __init__(self, dhan_client=None):
+        self.dhan_client = dhan_client
+
+    def _spread_value(self, trade, spot, vix, chain=None):
+        """Cost-to-close the spread: real (short legs @ ask, long legs @ bid) from
+        the chain when available, else Black-Scholes — the SAME basis as the real
+        entry credit, so no entry-real/exit-BS mis-mark."""
+        dte = (trade.expiry - today_ist()).days
+        T = max(dte / 365.0, 1 / 365.0)
+        sigma = vix / 100.0 if vix else 0.15
+        bs = compute_spread_value(
+            trade.trade_type, spot, trade.sell_strike, trade.buy_strike,
+            trade.ic_call_sell, trade.ic_call_buy, T, RISK_FREE_RATE, sigma,
+        )
+        if USE_REAL_OPTION_PRICING and chain and not trade.is_bear_debit:
+            v = value_spread_real(chain, trade.trade_type, {
+                "sell_strike": trade.sell_strike, "buy_strike": trade.buy_strike,
+                "ic_call_sell": trade.ic_call_sell, "ic_call_buy": trade.ic_call_buy,
+            }, bs)
+            return v["value"]
+        return bs
 
     async def open_trade(
         self,
@@ -324,28 +346,46 @@ class TradeManager:
         )
         open_trades = result.scalars().all()
 
+        # Fetch the live chain(s) once for real exit valuation (cached ~20s in the
+        # client, so the 3 versions' calls within a cycle dedupe). BS fallback if
+        # unavailable. Keyed by expiry.
+        chains = {}
+        if USE_REAL_OPTION_PRICING and getattr(self, "dhan_client", None):
+            for exp in {t.expiry for t in open_trades if not t.is_bear_debit}:
+                try:
+                    chains[exp] = await self.dhan_client.get_option_chain(exp.isoformat())
+                except Exception:
+                    chains[exp] = None
+                if chains.get(exp) is None:
+                    logger.warning(
+                        f"⚠️ [{version}] Exit pricing fell back to BS — "
+                        f"option chain unavailable for expiry {exp}."
+                    )
+
         for trade in open_trades:
+            chain = chains.get(trade.expiry)
             if trade.is_bear_debit:
                 exit_reason = await self._check_bear_debit_exit(
                     trade, spot, vix, cfg, loss_only=loss_only, is_eod=is_eod)
             else:
                 exit_reason = await self._check_single_exit(
-                    trade, spot, vix, cfg, loss_only=loss_only, is_eod=is_eod)
+                    trade, spot, vix, cfg, loss_only=loss_only, is_eod=is_eod, chain=chain)
 
             if exit_reason:
-                closed_info = await self._close_trade(trade, spot, exit_reason, db, vix=vix)
+                closed_info = await self._close_trade(trade, spot, exit_reason, db, vix=vix, chain=chain)
                 if closed_info:
                     closed_trades.append(closed_info)
             else:
                 # Update current PnL
-                await self._update_trade_pnl(trade, spot, vix, db)
+                await self._update_trade_pnl(trade, spot, vix, db, chain=chain)
 
         return closed_trades
 
     async def _check_single_exit(self, trade: Trade, spot: float,
                                   vix: float, cfg: dict,
                                   loss_only: bool = False,
-                                  is_eod: bool = False) -> Optional[str]:
+                                  is_eod: bool = False,
+                                  chain: dict = None) -> Optional[str]:
         """
         Check if a single credit trade should be exited. Returns exit reason or None.
 
@@ -363,15 +403,8 @@ class TradeManager:
         today = today_ist()
         dte = (trade.expiry - today).days
 
-        # Compute current spread value (needed for all checks)
-        T = max(dte / 365.0, 1 / 365.0)
-        sigma = vix / 100.0 if vix else 0.15
-        current_value = compute_spread_value(
-            trade.trade_type, spot,
-            trade.sell_strike, trade.buy_strike,
-            trade.ic_call_sell, trade.ic_call_buy,
-            T, RISK_FREE_RATE, sigma
-        )
+        # Current cost-to-close (real from the chain, else BS — same basis as entry)
+        current_value = self._spread_value(trade, spot, vix, chain)
 
         # PnL: credit_received - current_value (what it costs to close)
         pnl_per_unit = trade.credit_received - current_value
@@ -520,19 +553,12 @@ class TradeManager:
 
     async def _close_trade(self, trade: Trade, spot: float,
                             exit_reason: str, db: AsyncSession,
-                            vix: float = None) -> Optional[dict]:
+                            vix: float = None, chain: dict = None) -> Optional[dict]:
         """Close a trade and record final PnL. Returns trade info dict for notifications."""
         now = now_ist()
 
-        # Compute final PnL
-        T = max((trade.expiry - today_ist()).days / 365.0, 1 / 365.0)
-        sigma = vix / 100.0 if vix else 0.15
-        current_value = compute_spread_value(
-            trade.trade_type, spot,
-            trade.sell_strike, trade.buy_strike,
-            trade.ic_call_sell, trade.ic_call_buy,
-            T, RISK_FREE_RATE, sigma
-        )
+        # Final cost-to-close (real from the chain, else BS — same basis as entry)
+        current_value = self._spread_value(trade, spot, vix, chain)
 
         if trade.is_bear_debit:
             # Bear debit PnL: (current_value - entry_debit) * lots * lot_size
@@ -580,16 +606,9 @@ class TradeManager:
         return result
 
     async def _update_trade_pnl(self, trade: Trade, spot: float,
-                                 vix: float, db: AsyncSession):
+                                 vix: float, db: AsyncSession, chain: dict = None):
         """Update unrealized PnL for an open trade."""
-        T = max((trade.expiry - today_ist()).days / 365.0, 1 / 365.0)
-        sigma = vix / 100.0 if vix else 0.15
-        current_value = compute_spread_value(
-            trade.trade_type, spot,
-            trade.sell_strike, trade.buy_strike,
-            trade.ic_call_sell, trade.ic_call_buy,
-            T, RISK_FREE_RATE, sigma
-        )
+        current_value = self._spread_value(trade, spot, vix, chain)
 
         if trade.is_bear_debit:
             entry_debit = trade.entry_debit or 0

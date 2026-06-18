@@ -390,10 +390,17 @@ class DhanClient:
         """
         Fetch the Nifty option chain for *expiry_date* (``YYYY-MM-DD``).
 
+        Cached ~20s per expiry so the 5-min exit cycle's per-version calls dedupe.
         Returns the raw JSON dict, or None on error.
         """
+        cache = getattr(self, "_chain_cache", None)
+        if cache is None:
+            cache = self._chain_cache = {}
+        hit = cache.get(expiry_date)
+        if hit and time.monotonic() - hit[1] < 20.0:
+            return hit[0]
         try:
-            return await self._post(
+            data = await self._post(
                 "/optionchain",
                 {
                     "UnderlyingScrip": NIFTY_SECURITY_ID,
@@ -404,6 +411,8 @@ class DhanClient:
         except DhanAPIError:
             logger.exception("Failed to fetch option chain for %s", expiry_date)
             return None
+        cache[expiry_date] = (data, time.monotonic())
+        return data
 
     async def get_historical_ohlc(self, days: int = 365) -> list | None:
         """
