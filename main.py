@@ -521,7 +521,7 @@ async def recalculate_forward_test():
     from config import (
         ACTIVE_VERSIONS, VERSION_CONFIGS, INITIAL_CAPITAL, NIFTY_LOT_SIZE,
         RISK_FREE_RATE, MARGIN_PER_LOT_BULL, MARGIN_PER_LOT_IC,
-        BULL_OTM_SELL, BULL_OTM_BUY,
+        BULL_OTM_SELL, BULL_OTM_BUY, MIN_TOTAL_CREDIT, MIN_ENTRY_DTE,
     )
 
     FORWARD_TEST_START = date_cls(2026, 2, 13)
@@ -826,6 +826,14 @@ async def recalculate_forward_test():
 
                                 total_credit = credit * num_lots * NIFTY_LOT_SIZE
                                 capital_deployed = num_lots * margin
+
+                                # Live open_trade quality gate (previously missing here):
+                                # skip nano-credit / near-expiry entries so the forward
+                                # test matches what live trading actually takes. On the
+                                # Tuesday calendar this drops the 1-DTE Monday condors.
+                                dte_at_entry = (expiry - trade_date).days
+                                if total_credit < MIN_TOTAL_CREDIT or dte_at_entry < MIN_ENTRY_DTE:
+                                    continue
 
                                 trade_id = f"{version.replace('.', '')}-{trade_date.isoformat()}-{signal['signal']}"
 
