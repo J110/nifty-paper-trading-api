@@ -961,10 +961,12 @@ async def debug_snapshot_coverage(start: str = "2026-02-13"):
     intraday exit-replay harness. Reports totals, populated low/high/vix, and
     per-day gaps (IST date grouping)."""
     import traceback
+    from datetime import date as _date
     from sqlalchemy import text
     from db.database import async_session_factory
 
     try:
+        start_dt = _date.fromisoformat(start)
         async with async_session_factory() as db:
             summ = (await db.execute(text(
                 """
@@ -978,7 +980,7 @@ async def debug_snapshot_coverage(start: str = "2026-02-13"):
                 FROM price_snapshots
                 WHERE "timestamp" >= CAST(:start AS timestamptz)
                 """
-            ), {"start": start})).mappings().first()
+            ), {"start": start_dt})).mappings().first()
 
             per_day = (await db.execute(text(
                 """
@@ -989,7 +991,7 @@ async def debug_snapshot_coverage(start: str = "2026-02-13"):
                 WHERE "timestamp" >= CAST(:start AS timestamptz)
                 GROUP BY d ORDER BY d
                 """
-            ), {"start": start})).mappings().all()
+            ), {"start": start_dt})).mappings().all()
 
         total = summ["total"] or 0
         counts = [r["c"] for r in per_day]
