@@ -974,7 +974,7 @@ async def debug_snapshot_coverage(start: str = "2026-02-13"):
                    COUNT(vix) AS n_vix,
                    COUNT(DISTINCT (timestamp AT TIME ZONE 'Asia/Kolkata')::date) AS distinct_days
             FROM price_snapshots
-            WHERE timestamp >= :start
+            WHERE timestamp >= CAST(:start AS timestamptz)
             """
         ), {"start": start})).mappings().first()
 
@@ -984,7 +984,7 @@ async def debug_snapshot_coverage(start: str = "2026-02-13"):
                    COUNT(*) AS c, COUNT(nifty_low) AS lo,
                    COUNT(nifty_high) AS hi, COUNT(vix) AS vx
             FROM price_snapshots
-            WHERE timestamp >= :start
+            WHERE timestamp >= CAST(:start AS timestamptz)
             GROUP BY d ORDER BY d
             """
         ), {"start": start})).mappings().all()
