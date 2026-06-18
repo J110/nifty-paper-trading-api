@@ -12,7 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import select, func, delete
 
 from db.database import async_session_factory
-from db.models import Prediction, DailyFeature, DailyPnl, PriceSnapshot
+from db.models import Prediction, DailyFeature, DailyPnl, PriceSnapshot, Trade, DailyTradeMark
 from core.timezone import now_ist, today_ist
 from core.dhan_client import DhanClient
 from core.model_runner import ModelRunner
@@ -20,6 +20,8 @@ from core.signal_mapper import map_signal, get_classification_breakdown
 from core.feature_engine import build_live_features, StaleDataError
 from core.trade_manager import TradeManager
 from core.price_tracker import PriceTracker
+from core.option_pricer import compute_spread_value
+from core.real_option_pricer import value_spread_real
 from core.email_notifier import (
     send_trade_alert, send_no_trade_alert, send_exit_alert,
     send_data_stale_alert, send_pipeline_failure_alert,
@@ -29,6 +31,7 @@ from core.market_holidays import NSE_HOLIDAYS_2026 as _NSE_HOLIDAYS
 from config import (
     ACTIVE_VERSIONS, VERSION_CONFIGS, INITIAL_CAPITAL,
     DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH,
+    RISK_FREE_RATE, NIFTY_LOT_SIZE,
 )
 
 logger = logging.getLogger(__name__)
@@ -139,8 +142,87 @@ def setup_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
+    # 7. Record each open trade's REAL cost-to-close daily (15:32 IST, just after
+    #    close) so the track record accumulates real-priced marks going forward.
+    scheduler.add_job(
+        record_daily_marks,
+        CronTrigger(
+            day_of_week="mon-fri",
+            hour=15, minute=32,
+            timezone="Asia/Kolkata",
+        ),
+        id="daily_marks",
+        replace_existing=True,
+    )
+
     logger.info("Scheduler configured with all jobs (data→predictions→exits→eod→token)")
     return scheduler
+
+
+async def record_daily_marks():
+    """Record each open trade's REAL cost-to-close once daily (15:32 IST, after
+    close) so the track record accumulates real-priced marks going forward.
+
+    Entry credit is already stamped on each trade (real); this adds the daily
+    mark-to-market on real quotes, so a trade's whole life is real-priced. BS is
+    logged alongside for comparison, and a ⚠️ warning fires on chain-unavailable.
+    """
+    if today_ist() in _NSE_HOLIDAYS:
+        return
+    spot = await dhan_client.get_nifty_ltp()
+    vix = await dhan_client.get_india_vix()
+    if spot is None:
+        logger.warning("Daily real-price marks skipped — no live spot from Dhan")
+        return
+
+    async with async_session_factory() as db:
+        open_trades = (await db.execute(
+            select(Trade).where(Trade.status == "open")
+        )).scalars().all()
+
+        recorded, fallbacks = 0, 0
+        for t in open_trades:
+            if t.is_bear_debit:
+                continue
+            try:
+                chain = await dhan_client.get_option_chain(t.expiry.isoformat())
+            except Exception:
+                chain = None
+            dte = (t.expiry - today_ist()).days
+            T = max(dte / 365.0, 1 / 365.0)
+            sigma = (vix / 100.0) if vix else 0.15
+            bs_val = compute_spread_value(
+                t.trade_type, float(spot), t.sell_strike, t.buy_strike,
+                t.ic_call_sell, t.ic_call_buy, T, RISK_FREE_RATE, sigma,
+            )
+            pr = value_spread_real(chain, t.trade_type, {
+                "sell_strike": t.sell_strike, "buy_strike": t.buy_strike,
+                "ic_call_sell": t.ic_call_sell, "ic_call_buy": t.ic_call_buy,
+            }, bs_val)
+            unreal = (t.credit_received - pr["value"]) * t.num_lots * NIFTY_LOT_SIZE
+
+            # One mark per trade per day (idempotent — safe to re-run).
+            await db.execute(
+                delete(DailyTradeMark).where(
+                    DailyTradeMark.trade_id == t.trade_id,
+                    DailyTradeMark.date == today_ist(),
+                )
+            )
+            db.add(DailyTradeMark(
+                trade_id=t.trade_id, version=t.version, date=today_ist(),
+                spot=float(spot), vix=float(vix) if vix else None,
+                real_spread_value=pr["real_value"], bs_spread_value=round(bs_val, 2),
+                pricing_source=pr["source"], unrealized_pnl=round(unreal, 2),
+            ))
+            recorded += 1
+            if pr["source"] == "bs_fallback":
+                fallbacks += 1
+                logger.warning(
+                    f"⚠️ Daily mark for {t.trade_id} used BS — real chain "
+                    f"unavailable ({pr['fallback_reason']})."
+                )
+        await db.commit()
+        logger.info(f"Recorded {recorded} daily real-price marks ({fallbacks} BS fallbacks)")
 
 
 async def renew_dhan_token():

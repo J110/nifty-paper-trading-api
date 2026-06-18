@@ -219,3 +219,27 @@ class DailyPnl(Base):
     open_positions: Mapped[int] = mapped_column(Integer, nullable=False)
     trades_opened: Mapped[int] = mapped_column(Integer, default=0)
     trades_closed: Mapped[int] = mapped_column(Integer, default=0)
+
+
+# ------------------------------------------------------------------
+# 8. DailyTradeMark — daily REAL cost-to-close per open trade, so the track
+#    record accumulates real-priced marks from now on. (Pre-feature history
+#    stays BS — real prices for the traded strikes were never stored.)
+# ------------------------------------------------------------------
+class DailyTradeMark(Base):
+    __tablename__ = "daily_trade_marks"
+    __table_args__ = (UniqueConstraint("trade_id", "date", name="uq_daily_trade_mark"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_id: Mapped[str] = mapped_column(String(50), ForeignKey("trades.trade_id"), nullable=False)
+    version: Mapped[str] = mapped_column(String(10), nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    spot: Mapped[float] = mapped_column(Float, nullable=False)
+    vix: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    real_spread_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    bs_spread_value: Mapped[float] = mapped_column(Float, nullable=False)
+    pricing_source: Mapped[str] = mapped_column(String(20), nullable=False)
+    unrealized_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

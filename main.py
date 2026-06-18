@@ -1223,6 +1223,53 @@ async def debug_test_real_pricing():
         return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
 
+@app.get("/api/debug/daily-marks")
+async def debug_daily_marks(limit: int = 40):
+    """Read-only: recent daily real-vs-BS cost-to-close marks per open trade —
+    the accumulating real-priced history. Highlights BS fallbacks."""
+    import traceback
+    from collections import Counter
+    from sqlalchemy import select, desc
+    from db.database import async_session_factory
+    from db.models import DailyTradeMark
+    try:
+        async with async_session_factory() as db:
+            rows = (await db.execute(
+                select(DailyTradeMark)
+                .order_by(desc(DailyTradeMark.date), desc(DailyTradeMark.id))
+                .limit(limit)
+            )).scalars().all()
+        src = Counter()
+        marks = []
+        for m in rows:
+            src[m.pricing_source] += 1
+            r, b = m.real_spread_value, m.bs_spread_value
+            marks.append({
+                "date": m.date.isoformat(), "trade_id": m.trade_id, "version": m.version,
+                "spot": m.spot, "source": m.pricing_source,
+                "real_value": r, "bs_value": b,
+                "gap": round(r - b, 2) if (r is not None and b is not None) else None,
+                "unrealized_pnl": m.unrealized_pnl,
+                "BS_FALLBACK": m.pricing_source == "bs_fallback",
+            })
+        return {"count": len(marks), "by_source": dict(src),
+                "bs_fallbacks": src.get("bs_fallback", 0), "marks": marks}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+
+
+@app.post("/api/debug/run-daily-marks")
+async def debug_run_daily_marks():
+    """Manually trigger the daily real-price marks job (normally 15:32 IST)."""
+    import traceback
+    from scheduler.jobs import record_daily_marks
+    try:
+        await record_daily_marks()
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+
+
 @app.post("/api/debug/test-email")
 async def debug_test_email():
     """Send a test email to verify Resend API key and email delivery."""
