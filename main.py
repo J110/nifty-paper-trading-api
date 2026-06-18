@@ -1092,6 +1092,15 @@ async def debug_intraday_replay(start: str = "2026-02-13"):
                     daily_close[d] = {"spot": float(c),
                                       "vix": float(v) if not pd.isna(v) else 15.0}
 
+        # Overlay prediction spots — matches the recompute's close_prices: it prefers
+        # the live 9:20 Dhan spot on entry days, and predictions cover trading days
+        # that merged_daily (sparse in this window) lacks. Without this the day grid
+        # is too sparse and far fewer trades open.
+        for d, pr in predictions.items():
+            if pr["spot"] and pr["spot"] > 0:
+                daily_close[d] = {"spot": pr["spot"],
+                                  "vix": pr["vix"] if pr.get("vix") else daily_close.get(d, {}).get("vix", 15.0)}
+
         results = {}
         for ver in ACTIVE_VERSIONS:
             results[ver] = {
