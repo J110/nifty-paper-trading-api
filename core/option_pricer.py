@@ -8,6 +8,7 @@ import math
 from datetime import datetime, date, timedelta
 from scipy.stats import norm
 from core.timezone import today_ist
+from core.market_holidays import NSE_HOLIDAYS_2026
 
 logger = logging.getLogger(__name__)
 
@@ -245,19 +246,61 @@ def select_strikes(spot: float, trade_type: str, version_cfg: dict) -> dict:
         }
 
 
+# ---------------------------------------------------------------------------
+# Expiry calendar
+# ---------------------------------------------------------------------------
+# NSE shifted Nifty's weekly AND monthly expiry from Thursday to TUESDAY,
+# effective 2025-09-01 (SEBI single-weekly-benchmark rationalisation). Before
+# the cutover Nifty expired Thursday; on/after, Tuesday. We keep the switch so
+# historical recomputes before the cutover stay accurate, while live trading and
+# the post-cutover forward-test use the real Tuesday calendar.
+EXPIRY_DAY_CHANGE_DATE = date(2025, 9, 1)
+_EXPIRY_WEEKDAY_OLD = 3  # Thursday
+_EXPIRY_WEEKDAY_NEW = 1  # Tuesday
+_NSE_HOLIDAY_SET = set(NSE_HOLIDAYS_2026)
+
+
+def _expiry_weekday(for_date: date) -> int:
+    """Nifty expiry weekday: Thursday (3) before 2025-09-01, Tuesday (1) on/after."""
+    return _EXPIRY_WEEKDAY_NEW if for_date >= EXPIRY_DAY_CHANGE_DATE else _EXPIRY_WEEKDAY_OLD
+
+
+def _roll_back_to_trading_day(d: date) -> date:
+    """If *d* is a weekend or NSE holiday, roll back to the prior trading day.
+
+    Matches the exchange rule: when an expiry day is a holiday, the contract
+    expires on the previous trading day. (Holiday set currently covers 2026 —
+    the live + forward-test window; extend market_holidays for other years.)
+    """
+    while d.weekday() >= 5 or d in _NSE_HOLIDAY_SET:
+        d -= timedelta(days=1)
+    return d
+
+
 def get_next_weekly_expiry(from_date: date = None) -> date:
     """
-    Get next weekly Nifty expiry (Thursday).
-    If today is Thursday, returns next Thursday.
+    Get the next weekly Nifty expiry after *from_date* (never the same day — we
+    don't open a new position on expiry day).
+
+    NSE moved Nifty's weekly/monthly expiry from Thursday to **Tuesday** on
+    2025-09-01, so this returns the next Tuesday for current dates and the next
+    Thursday for pre-cutover dates. Holiday-adjusted: if the expiry day is an
+    NSE holiday it rolls back to the previous trading day.
     """
     if from_date is None:
         from_date = today_ist()
 
-    days_until_thursday = (3 - from_date.weekday()) % 7
-    if days_until_thursday == 0:
-        days_until_thursday = 7  # next Thursday, not today
+    target_weekday = _expiry_weekday(from_date)
+    days_until = (target_weekday - from_date.weekday()) % 7
+    if days_until == 0:
+        days_until = 7  # next week's expiry, not today
 
-    return from_date + timedelta(days=days_until_thursday)
+    expiry = _roll_back_to_trading_day(from_date + timedelta(days=days_until))
+    # A holiday roll-back can land on/before from_date (e.g. a Monday when the
+    # Tuesday expiry is a holiday) — use the following week's expiry instead.
+    if expiry <= from_date:
+        expiry = _roll_back_to_trading_day(from_date + timedelta(days=days_until + 7))
+    return expiry
 
 
 def compute_dte(entry_date: date, expiry_date: date) -> int:

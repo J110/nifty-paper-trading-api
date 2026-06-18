@@ -108,6 +108,7 @@ app.include_router(returns_router)
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     """Health check endpoint for Render + UptimeRobot pinger."""
+    import os
     from sqlalchemy import select, func
     from db.database import async_session_factory
     from db.models import Prediction
@@ -161,6 +162,7 @@ async def health_check():
         "dhan_token_expiry_utc": token_exp_iso,
         "dhan_token_hours_left": token_hours_left,
         "server_time_ist": now_ist().isoformat(),
+        "deployed_commit": (os.environ.get("RENDER_GIT_COMMIT") or "local")[:8],
     }
 
 
