@@ -1026,6 +1026,90 @@ async def debug_snapshot_coverage(start: str = "2026-02-13"):
         return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
 
+@app.get("/api/debug/intraday-replay")
+async def debug_intraday_replay(start: str = "2026-02-13"):
+    """Read-only: replay each version's exits at intraday (15-min snapshot)
+    resolution and compare to the daily-close recompute. breach_mode
+    close/spot/extreme brackets the live answer. Does NOT persist anything —
+    'close' should reproduce the stored forward-test (correctness check)."""
+    import traceback, os
+    from datetime import date as _date, datetime as _dt, timezone as _tz
+    import pandas as pd
+    from sqlalchemy import select
+    from db.database import async_session_factory
+    from db.models import Prediction, PriceSnapshot
+    from core.timezone import IST
+    from core.intraday_replay import replay
+    from config import ACTIVE_VERSIONS
+    try:
+        start_d = _date.fromisoformat(start)
+        start_dt = _dt(start_d.year, start_d.month, start_d.day, tzinfo=_tz.utc)
+
+        async with async_session_factory() as db:
+            prows = (await db.execute(
+                select(Prediction).where(Prediction.date >= start_d)
+                .order_by(Prediction.date, Prediction.version)
+            )).scalars().all()
+            srows = (await db.execute(
+                select(PriceSnapshot).where(PriceSnapshot.timestamp >= start_dt)
+                .order_by(PriceSnapshot.timestamp)
+            )).scalars().all()
+
+        # One prediction per date (same drawdown/spot/vix across versions).
+        predictions = {}
+        for p in prows:
+            if p.date not in predictions and p.nifty_spot and p.nifty_spot > 0:
+                predictions[p.date] = {
+                    "predicted_drawdown": p.predicted_drawdown,
+                    "spot": float(p.nifty_spot),
+                    "vix": float(p.vix) if p.vix else 15.0,
+                }
+
+        # Intraday marks grouped by IST date.
+        intraday_by_day = {}
+        for s in srows:
+            ist = s.timestamp.astimezone(IST)
+            intraday_by_day.setdefault(ist.date(), []).append((
+                ist.time(), float(s.nifty_spot),
+                float(s.nifty_low) if s.nifty_low else float(s.nifty_spot),
+                float(s.nifty_high) if s.nifty_high else float(s.nifty_spot),
+                float(s.vix) if s.vix else 15.0,
+            ))
+
+        # Daily close grid (the trading calendar + EOD/fallback valuation).
+        parquet_path = "/app/data/merged_daily.parquet"
+        if not os.path.exists(parquet_path):
+            parquet_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "data", "merged_daily.parquet")
+        md = pd.read_parquet(parquet_path)
+        daily_close = {}
+        for ts in md.index:
+            d = ts.date()
+            if d >= start_d:
+                c = md.loc[ts, "nifty_close"]
+                v = md.loc[ts].get("india_vix", 15.0)
+                if not pd.isna(c) and c > 0:
+                    daily_close[d] = {"spot": float(c),
+                                      "vix": float(v) if not pd.isna(v) else 15.0}
+
+        results = {}
+        for ver in ACTIVE_VERSIONS:
+            results[ver] = {
+                mode: replay(ver, predictions, intraday_by_day, daily_close, breach_mode=mode)
+                for mode in ["close", "spot", "extreme"]
+            }
+
+        return {
+            "window_start": start,
+            "n_pred_dates": len(predictions),
+            "n_snapshot_days": len(intraday_by_day),
+            "n_trading_days": len(daily_close),
+            "results": results,
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+
+
 @app.post("/api/debug/test-email")
 async def debug_test_email():
     """Send a test email to verify Resend API key and email delivery."""
