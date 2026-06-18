@@ -165,6 +165,12 @@ def _build_trade_html(
                     <td style="color:#3fb950;padding:4px 12px;font-weight:600;">{_format_currency(trade_result.get('total_credit', 0))}</td>
                 </tr>
                 <tr>
+                    <td style="color:#8b949e;padding:4px 12px;">Pricing</td>
+                    <td style="color:{'#f85149' if trade_result.get('pricing_source') == 'bs_fallback' else '#d29922' if trade_result.get('pricing_source') == 'real_ltp' else '#3fb950'};padding:4px 12px;font-weight:600;">
+                        {'⚠️ BS FALLBACK — ' + str(trade_result.get('pricing_reason')) if trade_result.get('pricing_source') == 'bs_fallback' else 'REAL · LTP/illiquid' if trade_result.get('pricing_source') == 'real_ltp' else 'REAL (Dhan chain)' if trade_result.get('pricing_source') == 'real' else 'BS (synthetic)'} &nbsp;(real {_format_currency(trade_result.get('real_credit') or 0)} vs BS {_format_currency(trade_result.get('bs_credit') or 0)})
+                    </td>
+                </tr>
+                <tr>
                     <td style="color:#8b949e;padding:4px 12px;">Expiry</td>
                     <td style="color:#e6edf3;padding:4px 12px;font-weight:600;">{trade_result.get('expiry', 'N/A')}</td>
                 </tr>

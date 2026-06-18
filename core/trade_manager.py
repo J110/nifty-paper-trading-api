@@ -20,7 +20,7 @@ from config import (
     MARGIN_PER_LOT_BULL, MARGIN_PER_LOT_IC, MARGIN_PER_LOT_BEAR,
     VERSION_CONFIGS,
     BULL_OTM_SELL, BULL_OTM_BUY,
-    MIN_TOTAL_CREDIT, MIN_ENTRY_DTE,
+    MIN_TOTAL_CREDIT, MIN_ENTRY_DTE, USE_REAL_OPTION_PRICING,
 )
 from core.option_pricer import (
     select_strikes, price_bull_put_spread, price_iron_condor,
@@ -28,6 +28,7 @@ from core.option_pricer import (
     get_next_weekly_expiry, compute_time_to_expiry_years,
     compute_spread_value,
 )
+from core.real_option_pricer import price_spread_real, log_pricing
 from db.models import Trade, DailyPnl, Prediction
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,10 @@ class TradeManager:
         T = compute_time_to_expiry_years(today_ist(), expiry)
         sigma = vix / 100.0 if vix else 0.15
 
+        # Pricing-source metadata (overridden below for credit trades when real
+        # option pricing is on); defaults keep the bear-debit + disabled paths safe.
+        pricing_source, bs_credit_unit, real_credit_unit, pricing_reason = "bs_synthetic", None, None, None
+
         if is_bear_debit:
             # Bear put debit: buy higher-strike put, sell lower-strike put
             debit = price_bear_put_debit(
@@ -153,6 +158,24 @@ class TradeManager:
                 )
             else:
                 credit = 0
+
+            # --- Real option pricing: use the actual Dhan chain quote (sell@bid,
+            # buy@ask) instead of synthetic BS where available; fall back to BS and
+            # FLAG it loudly otherwise. Controlled by USE_REAL_OPTION_PRICING.
+            bs_credit_unit = round(credit, 2)
+            if USE_REAL_OPTION_PRICING and dhan_client is not None:
+                try:
+                    chain = await dhan_client.get_option_chain(expiry.isoformat())
+                except Exception as e:
+                    chain = None
+                    logger.warning(f"[{version}] Option-chain fetch failed for real pricing: {e}")
+                pr = price_spread_real(chain, trade_type, strikes, credit)
+                log_pricing(version, trade_type, pr)
+                credit = pr["credit"]
+                pricing_source = pr["source"]
+                bs_credit_unit = pr["bs_credit"]
+                real_credit_unit = pr["real_credit"]
+                pricing_reason = pr["fallback_reason"]
 
             position_size_pct = cfg.get("POSITION_SIZE_PCT", 0.20)
             if trade_type == "iron_condor":
@@ -229,6 +252,9 @@ class TradeManager:
             max_loss_amount=total_max_loss,
             bear_trail_high=0.0,
             entry_vix=vix,
+            pricing_source=pricing_source,
+            bs_credit=bs_credit_unit,
+            real_credit=real_credit_unit,
         )
 
         # Guard against duplicate trades (e.g. pipeline re-run on same day)
@@ -268,6 +294,10 @@ class TradeManager:
             result.update({
                 "credit": credit,
                 "total_credit": total_credit,
+                "pricing_source": pricing_source,
+                "bs_credit": bs_credit_unit,
+                "real_credit": real_credit_unit,
+                "pricing_reason": pricing_reason,
             })
         return result
 

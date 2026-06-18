@@ -98,6 +98,10 @@ class Trade(Base):
     trailing_stop_active: Mapped[bool] = mapped_column(Boolean, default=False)
     # VIX at entry (for VIX spike exit: exit if VIX > threshold AND VIX > entry_vix * 1.3)
     entry_vix: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Real-vs-synthetic option pricing (see core/real_option_pricer.py)
+    pricing_source: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    bs_credit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    real_credit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

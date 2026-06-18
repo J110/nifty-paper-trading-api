@@ -42,6 +42,11 @@ DHAN_NIFTY_SECURITY_ID = "13"
 DHAN_VIX_SECURITY_ID = "21"  # Confirmed from Dhan scrip master (was 26, which was wrong)
 DHAN_RATE_LIMIT_DELAY = 0.25
 
+# Price trades from the real Dhan option chain (sell@bid / buy@ask) instead of
+# synthetic Black-Scholes, falling back to BS (flagged) when the chain has no
+# usable quote. Toggle off via env to revert to pure BS without a redeploy.
+USE_REAL_OPTION_PRICING = os.environ.get("USE_REAL_OPTION_PRICING", "true").lower() == "true"
+
 # ============================================================
 # Shared Trade Parameters
 # ============================================================

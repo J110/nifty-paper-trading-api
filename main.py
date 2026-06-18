@@ -41,6 +41,22 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized")
 
+    # Ensure real-option-pricing columns exist on the trades table (idempotent).
+    try:
+        from sqlalchemy import text as _text
+        from db.database import async_session_factory as _asf
+        async with _asf() as _db:
+            for _sql in (
+                "ALTER TABLE trades ADD COLUMN IF NOT EXISTS pricing_source VARCHAR(20)",
+                "ALTER TABLE trades ADD COLUMN IF NOT EXISTS bs_credit FLOAT",
+                "ALTER TABLE trades ADD COLUMN IF NOT EXISTS real_credit FLOAT",
+            ):
+                await _db.execute(_text(_sql))
+            await _db.commit()
+        logger.info("Real-pricing columns ensured")
+    except Exception as _e:
+        logger.warning(f"Pricing-column migration note: {_e}")
+
     # Eagerly initialize DhanClient so the DB-backed token (which may
     # be fresher than the bootstrap env var) is loaded into memory now,
     # rather than lazily on the first market-data call. Without this,
@@ -1114,6 +1130,89 @@ async def debug_intraday_replay(start: str = "2026-02-13"):
             "n_snapshot_days": len(intraday_by_day),
             "n_trading_days": len(daily_close),
             "results": results,
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+
+
+@app.get("/api/debug/pricing-comparison")
+async def debug_pricing_comparison(limit: int = 50):
+    """Read-only: per-trade real-vs-BS credit + pricing source, newest first.
+    Highlights any trade that fell back to synthetic BS pricing."""
+    import traceback
+    from collections import Counter
+    from sqlalchemy import select, desc
+    from db.database import async_session_factory
+    from db.models import Trade
+    try:
+        async with async_session_factory() as db:
+            rows = (await db.execute(
+                select(Trade).order_by(desc(Trade.entry_date), desc(Trade.id)).limit(limit)
+            )).scalars().all()
+        src_counts = Counter()
+        trades = []
+        for t in rows:
+            src = t.pricing_source or "bs_synthetic"
+            src_counts[src] += 1
+            real, bs = t.real_credit, t.bs_credit
+            trades.append({
+                "trade_id": t.trade_id, "version": t.version,
+                "entry_date": t.entry_date.isoformat() if t.entry_date else None,
+                "trade_type": t.trade_type, "pricing_source": src,
+                "bs_credit": bs, "real_credit": real, "credit_used": t.credit_received,
+                "gap": round(real - bs, 2) if (real is not None and bs is not None) else None,
+                "BS_FALLBACK": src == "bs_fallback",
+            })
+        return {
+            "count": len(trades),
+            "by_source": dict(src_counts),
+            "bs_fallbacks": src_counts.get("bs_fallback", 0),
+            "trades": trades,
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+
+
+@app.get("/api/debug/test-real-pricing")
+async def debug_test_real_pricing():
+    """Read-only: fetch the live option chain for the next expiry, parse it, and
+    price a sample iron condor — verifies the chain parser against real Dhan data
+    and shows real-vs-BS. Returns a raw sample if parsing finds nothing."""
+    import traceback
+    from core.option_pricer import (
+        get_next_weekly_expiry, select_strikes, price_iron_condor,
+        compute_time_to_expiry_years,
+    )
+    from core.real_option_pricer import parse_chain, price_spread_real
+    from core.timezone import today_ist
+    from config import RISK_FREE_RATE
+    from scheduler.jobs import dhan_client
+    try:
+        expiry = get_next_weekly_expiry()
+        chain = await dhan_client.get_option_chain(expiry.isoformat())
+        if not chain:
+            return {"status": "no_chain", "expiry": expiry.isoformat()}
+        data = chain.get("data", chain)
+        spot = data.get("last_price") or await dhan_client.get_nifty_ltp()
+        parsed = parse_chain(chain)
+        strikes = select_strikes(float(spot), "iron_condor", {
+            "IC_PUT_OTM_SELL": 0.03, "IC_PUT_OTM_BUY": 0.055,
+            "IC_CALL_OTM_SELL": 0.04, "IC_CALL_OTM_BUY": 0.065})
+        vix = await dhan_client.get_india_vix() or 14.0
+        T = compute_time_to_expiry_years(today_ist(), expiry)
+        bs = price_iron_condor(float(spot), strikes["sell_strike"], strikes["buy_strike"],
+                               strikes["ic_call_sell"], strikes["ic_call_buy"],
+                               T, RISK_FREE_RATE, vix / 100.0, apply_slippage=True)
+        pricing = price_spread_real(chain, "iron_condor", strikes, bs)
+        sample = None
+        if not parsed:
+            oc = data.get("oc") or data.get("option_chain") or {}
+            k = next(iter(oc), None)
+            sample = {k: oc.get(k)} if k else {"data_keys": list(data.keys())[:10]}
+        return {
+            "expiry": expiry.isoformat(), "spot": spot, "vix": vix,
+            "strikes": strikes, "parsed_strikes": len(parsed),
+            "pricing": pricing, "raw_sample_if_unparsed": sample,
         }
     except Exception as e:
         return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
