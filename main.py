@@ -960,64 +960,68 @@ async def debug_snapshot_coverage(start: str = "2026-02-13"):
     """Read-only: coverage of price_snapshots over [start, now] — gates the
     intraday exit-replay harness. Reports totals, populated low/high/vix, and
     per-day gaps (IST date grouping)."""
+    import traceback
     from sqlalchemy import text
     from db.database import async_session_factory
 
-    async with async_session_factory() as db:
-        summ = (await db.execute(text(
-            """
-            SELECT COUNT(*) AS total,
-                   MIN(timestamp) AS earliest,
-                   MAX(timestamp) AS latest,
-                   COUNT(nifty_low) AS n_low,
-                   COUNT(nifty_high) AS n_high,
-                   COUNT(vix) AS n_vix,
-                   COUNT(DISTINCT (timestamp AT TIME ZONE 'Asia/Kolkata')::date) AS distinct_days
-            FROM price_snapshots
-            WHERE timestamp >= CAST(:start AS timestamptz)
-            """
-        ), {"start": start})).mappings().first()
+    try:
+        async with async_session_factory() as db:
+            summ = (await db.execute(text(
+                """
+                SELECT COUNT(*) AS total,
+                       MIN("timestamp") AS earliest,
+                       MAX("timestamp") AS latest,
+                       COUNT(nifty_low) AS n_low,
+                       COUNT(nifty_high) AS n_high,
+                       COUNT(vix) AS n_vix,
+                       COUNT(DISTINCT ("timestamp" AT TIME ZONE 'Asia/Kolkata')::date) AS distinct_days
+                FROM price_snapshots
+                WHERE "timestamp" >= CAST(:start AS timestamptz)
+                """
+            ), {"start": start})).mappings().first()
 
-        per_day = (await db.execute(text(
-            """
-            SELECT (timestamp AT TIME ZONE 'Asia/Kolkata')::date AS d,
-                   COUNT(*) AS c, COUNT(nifty_low) AS lo,
-                   COUNT(nifty_high) AS hi, COUNT(vix) AS vx
-            FROM price_snapshots
-            WHERE timestamp >= CAST(:start AS timestamptz)
-            GROUP BY d ORDER BY d
-            """
-        ), {"start": start})).mappings().all()
+            per_day = (await db.execute(text(
+                """
+                SELECT ("timestamp" AT TIME ZONE 'Asia/Kolkata')::date AS d,
+                       COUNT(*) AS c, COUNT(nifty_low) AS lo,
+                       COUNT(nifty_high) AS hi, COUNT(vix) AS vx
+                FROM price_snapshots
+                WHERE "timestamp" >= CAST(:start AS timestamptz)
+                GROUP BY d ORDER BY d
+                """
+            ), {"start": start})).mappings().all()
 
-    total = summ["total"] or 0
-    counts = [r["c"] for r in per_day]
-    days = [{"date": str(r["d"]), "n": r["c"], "low": r["lo"], "high": r["hi"], "vix": r["vx"]}
-            for r in per_day]
+        total = summ["total"] or 0
+        counts = [r["c"] for r in per_day]
+        days = [{"date": str(r["d"]), "n": r["c"], "low": r["lo"], "high": r["hi"], "vix": r["vx"]}
+                for r in per_day]
 
-    def pct(n):
-        return round(100.0 * (n or 0) / total, 1) if total else 0.0
+        def pct(n):
+            return round(100.0 * (n or 0) / total, 1) if total else 0.0
 
-    return {
-        "window_start": start,
-        "total_snapshots": total,
-        "earliest": str(summ["earliest"]) if summ["earliest"] else None,
-        "latest": str(summ["latest"]) if summ["latest"] else None,
-        "distinct_days": summ["distinct_days"],
-        "populated_pct": {
-            "nifty_low": pct(summ["n_low"]),
-            "nifty_high": pct(summ["n_high"]),
-            "vix": pct(summ["n_vix"]),
-        },
-        "per_day_snapshots": {
-            "avg": round(sum(counts) / len(counts), 1) if counts else 0,
-            "min": min(counts) if counts else 0,
-            "max": max(counts) if counts else 0,
-        },
-        "sparse_days_lt10": [d for d in days if d["n"] < 10],
-        "days_missing_low": [d["date"] for d in days if d["low"] == 0],
-        "days_missing_vix": [d["date"] for d in days if d["vix"] == 0],
-        "days": days,
-    }
+        return {
+            "window_start": start,
+            "total_snapshots": total,
+            "earliest": str(summ["earliest"]) if summ["earliest"] else None,
+            "latest": str(summ["latest"]) if summ["latest"] else None,
+            "distinct_days": summ["distinct_days"],
+            "populated_pct": {
+                "nifty_low": pct(summ["n_low"]),
+                "nifty_high": pct(summ["n_high"]),
+                "vix": pct(summ["n_vix"]),
+            },
+            "per_day_snapshots": {
+                "avg": round(sum(counts) / len(counts), 1) if counts else 0,
+                "min": min(counts) if counts else 0,
+                "max": max(counts) if counts else 0,
+            },
+            "sparse_days_lt10": [d for d in days if d["n"] < 10],
+            "days_missing_low": [d["date"] for d in days if d["low"] == 0],
+            "days_missing_vix": [d["date"] for d in days if d["vix"] == 0],
+            "days": days,
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
 
 @app.post("/api/debug/test-email")
