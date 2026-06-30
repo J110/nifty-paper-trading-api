@@ -90,6 +90,43 @@ def _build_trade_html(
     else:
         strikes_html = ""
 
+    # Per-leg expected fills (sell@bid / buy@ask) — lets you compare each leg against
+    # the live Kite bid/ask at 9:20 before placing (the manual fill-validation check).
+    legs = trade_result.get("pricing_legs") or []
+    if legs and trade_result.get("pricing_source") in ("real", "real_ltp"):
+        leg_rows = ""
+        for lg in legs:
+            act = str(lg.get("action", "")).upper()
+            opt = str(lg.get("opt", "")).upper()
+            stk = lg.get("strike")
+            stk_str = f"{stk:,.0f}" if isinstance(stk, (int, float)) else str(stk)
+            src = lg.get("px_source", "")
+            src_label = {"bid": "bid", "ask": "ask", "ltp": "LTP · illiquid"}.get(src, src)
+            act_color = "#3fb950" if lg.get("action") == "sell" else "#f85149"
+            leg_rows += f"""
+                <tr>
+                    <td style="padding:4px 12px;"><span style="color:{act_color};font-weight:600;">{act}</span> <span style="color:#e6edf3;">{stk_str} {opt}</span></td>
+                    <td style="color:#e6edf3;padding:4px 12px;font-weight:600;text-align:right;">{_format_currency(lg.get('price', 0))} <span style="color:#8b949e;font-weight:400;font-size:11px;">({src_label})</span></td>
+                </tr>"""
+        legs_html = f"""
+        <div style="padding:0 24px 16px;">
+            <h3 style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 8px;">
+                Expected Leg Fills (model)
+            </h3>
+            <table style="width:100%;border-collapse:collapse;background:#161b22;border-radius:8px;">
+                {leg_rows}
+                <tr>
+                    <td style="border-top:1px solid #30363d;color:#8b949e;padding:6px 12px;">Net credit / unit</td>
+                    <td style="border-top:1px solid #30363d;color:#3fb950;padding:6px 12px;font-weight:700;text-align:right;">{_format_currency(trade_result.get('credit', 0))}</td>
+                </tr>
+            </table>
+            <p style="color:#6e7681;font-size:11px;margin:8px 12px 0;line-height:1.5;">
+                Compare each leg to the live bid/ask on Kite at 9:20 before placing — you sell near the <b>bid</b>, buy near the <b>ask</b>. If your basket's net credit lands close to the model's, fills are tracking.
+            </p>
+        </div>"""
+    else:
+        legs_html = ""
+
     return f"""
     <div style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;background:#0d1117;border:1px solid #30363d;border-radius:12px;overflow:hidden;">
 
@@ -184,6 +221,8 @@ def _build_trade_html(
                 </tr>
             </table>
         </div>
+
+        {legs_html}
 
         <!-- Footer -->
         <div style="padding:12px 24px 16px;border-top:1px solid #21262d;">

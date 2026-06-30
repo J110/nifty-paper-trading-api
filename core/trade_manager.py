@@ -131,6 +131,7 @@ class TradeManager:
         # Pricing-source metadata (overridden below for credit trades when real
         # option pricing is on); defaults keep the bear-debit + disabled paths safe.
         pricing_source, bs_credit_unit, real_credit_unit, pricing_reason = "bs_synthetic", None, None, None
+        pricing_legs = []  # per-leg fill detail (sell@bid / buy@ask) for the signal email
 
         if is_bear_debit:
             # Bear put debit: buy higher-strike put, sell lower-strike put
@@ -198,6 +199,7 @@ class TradeManager:
                 bs_credit_unit = pr["bs_credit"]
                 real_credit_unit = pr["real_credit"]
                 pricing_reason = pr["fallback_reason"]
+                pricing_legs = pr.get("legs") or []
 
             position_size_pct = cfg.get("POSITION_SIZE_PCT", 0.20)
             if trade_type == "iron_condor":
@@ -320,6 +322,7 @@ class TradeManager:
                 "bs_credit": bs_credit_unit,
                 "real_credit": real_credit_unit,
                 "pricing_reason": pricing_reason,
+                "pricing_legs": pricing_legs,
             })
         return result
 
