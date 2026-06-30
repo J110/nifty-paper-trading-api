@@ -121,6 +121,13 @@ Verified not in the deployed import graph; kept for reference only.
   orders); the BS analysis tools (recompute, intraday-replay); `shared/feature_compute.py`
   monthly-expiry features still use last-Thursday (kept for **train/serve consistency** —
   do NOT naively flip to Tuesday without retraining the model).
+- **`DailyPnl.daily_pnl` FOOTGUN:** the live EOD job (`scheduler/jobs.py`) stores the
+  *cumulative* portfolio total into BOTH `daily_pnl` and `cumulative_pnl` (so `daily_pnl`
+  is a running snapshot, NOT a daily increment), while the backtest-era rows store a true
+  daily increment in `daily_pnl`. The equity-curve endpoint (`api/charts.py`) accounts for
+  this: it trusts `cumulative_pnl` when populated (live), else sums increments (backtest),
+  then rebases per window. **Do NOT "simplify" it back to `sum(daily_pnl)`** — that
+  double-counts the live era and balloons the curve (fixed in 6b3873f).
 
 ---
 
