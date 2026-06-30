@@ -4,9 +4,17 @@ Defines version-specific parameters for signal mapping, exits, and sizing.
 """
 
 import os
+from datetime import date
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Real-pricing cutover: the first date trades were priced on REAL Dhan quotes
+# (sell@bid / buy@ask) instead of Black-Scholes. The dashboard tracks ACTUAL live
+# profit from this date, and the BS forward-test recompute must NEVER delete or
+# rebuild trades on/after it (see main.py recalculate_forward_test). First src=real
+# trade was 2026-06-19; 2026-06-18 and earlier opened on BS (pre-deploy).
+REAL_PRICING_START = date(2026, 6, 19)
 
 # ============================================================
 # Environment

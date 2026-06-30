@@ -19,10 +19,18 @@ and *what is archived reference only*. Read it before changing anything.
 2. **The analysis/debug tools DO use Black-Scholes or coarse daily data — they are NOT
    how live trades are priced.** This is the #1 source of confusion. Specifically:
    - `/api/debug/recalculate-forward-test` (the "+X% returns" recompute) → **BS, daily close.**
+     **Confined to the BS era `[2026-02-13, config.REAL_PRICING_START)`** — it deletes and
+     rebuilds only pre-cutover trades and will NOT touch the real-priced live trades on/after
+     `REAL_PRICING_START` (2026-06-19). It used to delete the whole table from Feb 13, which
+     clobbered the live record; that is now fixed. Running it is safe for the live data.
    - `core/intraday_replay.py` (`/api/debug/intraday-replay`) → **BS, 15-min snapshots.**
    - `archive/scripts/bhavcopy_backtest.py` → **real NSE Bhavcopy daily prices** (this one is real, but daily/no-spread).
    - When you report numbers, state which engine produced them. Do not equate
      analysis-tool output with live behaviour.
+   - **Dashboard data modes pivot on `config.REAL_PRICING_START` (2026-06-19):**
+     `forwardtest` = the real-priced live era (`entry_date >= REAL_PRICING_START`) — this is
+     the **ACTUAL tracked profit**; `backtest` = the older BS period before it; `combined` = all.
+     Read `forwardtest` for real performance (`api/trades.py`, `api/charts.py`).
 
 3. **NSE Nifty expiry is TUESDAY** (changed from Thursday on 2025-09-01).
    `core/option_pricer.py::get_next_weekly_expiry` is date-aware (Thursday before the

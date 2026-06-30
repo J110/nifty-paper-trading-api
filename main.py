@@ -541,6 +541,11 @@ async def recalculate_forward_test():
     )
 
     FORWARD_TEST_START = date_cls(2026, 2, 13)
+    # The recompute is a Black-Scholes analysis tool. It is confined to the BS era
+    # [FORWARD_TEST_START, REAL_PRICING_START) and MUST NOT delete or rebuild the
+    # real-priced live trades on/after REAL_PRICING_START — those are the actual
+    # tracked record. See config.REAL_PRICING_START.
+    from config import REAL_PRICING_START
 
     logger.info("=== Starting forward test recalculation ===")
 
@@ -564,7 +569,8 @@ async def recalculate_forward_test():
             # 1. Load all forward test predictions from DB
             result = await db.execute(
                 select(Prediction).where(
-                    Prediction.date >= FORWARD_TEST_START
+                    Prediction.date >= FORWARD_TEST_START,
+                    Prediction.date < REAL_PRICING_START,
                 ).order_by(Prediction.date, Prediction.version)
             )
             all_predictions = result.scalars().all()
@@ -604,7 +610,7 @@ async def recalculate_forward_test():
             close_prices = {}
             for ts in merged_daily.index:
                 d = ts.date()
-                if d >= FORWARD_TEST_START:
+                if FORWARD_TEST_START <= d < REAL_PRICING_START:
                     close_val = merged_daily.loc[ts, "nifty_close"]
                     vix_val = merged_daily.loc[ts].get("india_vix", 15.0)
                     if not pd.isna(close_val) and close_val > 0:
@@ -627,7 +633,10 @@ async def recalculate_forward_test():
             # 3. Delete all forward test trades, daily_pnl, delay_prices
             # First get trade_ids for delay_prices cleanup
             fwd_trades_result = await db.execute(
-                select(Trade.trade_id).where(Trade.entry_date >= FORWARD_TEST_START)
+                select(Trade.trade_id).where(
+                    Trade.entry_date >= FORWARD_TEST_START,
+                    Trade.entry_date < REAL_PRICING_START,
+                )
             )
             fwd_trade_ids = [r[0] for r in fwd_trades_result.fetchall()]
 
@@ -636,10 +645,16 @@ async def recalculate_forward_test():
                     delete(DelayPrice).where(DelayPrice.trade_id.in_(fwd_trade_ids))
                 )
             await db.execute(
-                delete(Trade).where(Trade.entry_date >= FORWARD_TEST_START)
+                delete(Trade).where(
+                    Trade.entry_date >= FORWARD_TEST_START,
+                    Trade.entry_date < REAL_PRICING_START,
+                )
             )
             await db.execute(
-                delete(DailyPnl).where(DailyPnl.date >= FORWARD_TEST_START)
+                delete(DailyPnl).where(
+                    DailyPnl.date >= FORWARD_TEST_START,
+                    DailyPnl.date < REAL_PRICING_START,
+                )
             )
             await db.commit()
             logger.info(f"Deleted {len(fwd_trade_ids)} forward test trades + related data")

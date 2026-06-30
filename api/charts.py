@@ -340,7 +340,10 @@ async def get_drawdown_comparison(
     }
 
 
-FORWARD_TEST_START = date(2026, 2, 13)
+# Dashboard's forward-test boundary = the real-pricing cutover (single source of
+# truth in config). "forwardtest" mode now shows the ACTUAL real-priced live era;
+# "backtest" mode shows the older Black-Scholes period before it.
+from config import REAL_PRICING_START as FORWARD_TEST_START
 
 
 @router.get("/chart-data/equity/{version}")

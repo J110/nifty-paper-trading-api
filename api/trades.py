@@ -89,7 +89,9 @@ async def get_delay_analysis(
     }
 
 
-FORWARD_TEST_START = date(2026, 2, 13)
+# Dashboard's forward-test boundary = the real-pricing cutover (single source of
+# truth in config). "forwardtest" mode now tracks the ACTUAL real-priced live era.
+from config import REAL_PRICING_START as FORWARD_TEST_START
 
 
 @router.get("/trades/{version}/returns")
@@ -104,9 +106,9 @@ async def get_returns(
     """
     Returns periodic returns.
 
-    data_mode:
-      - backtest: trades with entry_date < 2026-02-13
-      - forwardtest: trades with entry_date >= 2026-02-13
+    data_mode (boundary = config.REAL_PRICING_START, the real-pricing cutover):
+      - backtest: trades before real pricing (entry_date < REAL_PRICING_START) — Black-Scholes era
+      - forwardtest: real-priced live trades (entry_date >= REAL_PRICING_START) — the ACTUAL tracked profit
       - combined: all trades
 
     from_date / to_date: optional ISO date strings to further restrict the range.
