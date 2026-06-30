@@ -367,19 +367,40 @@ async def get_equity_curve(
     result = await db.execute(stmt)
     daily_pnls = result.scalars().all()
 
-    # For non-combined modes, rebase the equity curve from INITIAL_CAPITAL
-    equity_points = []
-    cumulative_pnl = 0.0
+    # Reconstruct the running account P&L robustly, because two record semantics
+    # coexist in the table:
+    #   - backtest era: `daily_pnl` is a true DAILY INCREMENT (cumulative_pnl may be unset)
+    #   - live era (EOD job, scheduler/jobs.py): `daily_pnl` AND `cumulative_pnl` both hold
+    #     the running PORTFOLIO total (a cumulative snapshot, NOT an increment)
+    # Summing daily_pnl blindly therefore double-counts the live era. So: trust
+    # cumulative_pnl when populated (live), else accumulate daily increments (backtest).
+    running_total = 0.0
+    series = []  # (date, account_pnl_to_date, open_positions)
     for dp in daily_pnls:
-        cumulative_pnl += dp.daily_pnl
-        capital = INITIAL_CAPITAL + cumulative_pnl
+        if dp.cumulative_pnl:
+            running_total = dp.cumulative_pnl
+        else:
+            running_total += (dp.daily_pnl or 0.0)
+        series.append((dp.date, running_total, dp.open_positions))
+
+    # Rebase so a backtest/forwardtest window starts at zero (it shows the P&L earned
+    # WITHIN the window — e.g. forwardtest = real-priced profit since REAL_PRICING_START);
+    # combined shows the absolute curve from inception.
+    baseline = series[0][1] if (series and data_mode != "combined") else 0.0
+    prev_total = baseline
+    equity_points = []
+    for d, total, open_pos in series:
+        cum = total - baseline
+        day_incr = total - prev_total
+        prev_total = total
+        capital = INITIAL_CAPITAL + cum
         equity_points.append({
-            "date": dp.date.isoformat(),
+            "date": d.isoformat(),
             "capital": round(capital, 2),
-            "daily_pnl": dp.daily_pnl,
-            "cumulative_pnl": round(cumulative_pnl, 2),
-            "cumulative_return_pct": round(cumulative_pnl / INITIAL_CAPITAL * 100, 2),
-            "open_positions": dp.open_positions,
+            "daily_pnl": round(day_incr, 2),
+            "cumulative_pnl": round(cum, 2),
+            "cumulative_return_pct": round(cum / INITIAL_CAPITAL * 100, 2),
+            "open_positions": open_pos,
         })
 
     return {
