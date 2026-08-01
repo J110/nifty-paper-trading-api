@@ -59,7 +59,11 @@ USE_REAL_OPTION_PRICING = os.environ.get("USE_REAL_OPTION_PRICING", "true").lowe
 # Shared Trade Parameters
 # ============================================================
 INITIAL_CAPITAL = 2_500_000
-NIFTY_LOT_SIZE = 25
+# Broker-verified on Kite 2026-07-30 (order screen minimum qty). Was wrongly 25.
+# NOTE: exit P&L = (credit - value) * num_lots * NIFTY_LOT_SIZE, so this constant is
+# applied at EXIT time. Never change it while trades are open — their num_lots was
+# sized under the old value and they would be mis-valued.
+NIFTY_LOT_SIZE = 65
 RISK_FREE_RATE = 0.07
 DTE_TARGET = 10
 DTE_MIN_ENTRY = 5
@@ -74,10 +78,38 @@ IC_PUT_OTM_SELL = 0.03
 IC_PUT_OTM_BUY = 0.055
 IC_CALL_OTM_BUY = 0.055
 
-# Margin per lot
-MARGIN_PER_LOT_BULL = 13_750
-MARGIN_PER_LOT_IC = 13_750
-MARGIN_PER_LOT_BEAR = 18_750
+# Margin per lot — measured on Kite 2026-07-30 at spot 24,265 with 600-pt wings.
+# Verified formula (within 1.2% on 4 baskets):
+#     margin = max_loss + 0.02 * spot * qty * n_short_legs
+# The exposure term (~Rs31.5k per short contract) is ~62% of the total and does NOT
+# shrink with narrower wings. These are SNAPSHOTS: the exposure part scales with spot,
+# so they drift as Nifty moves (~+4% at 26,000). Recompute if spot moves a lot.
+MARGIN_PER_LOT_BULL = 69_501     # 1 short leg  (measured: put spread only)
+MARGIN_PER_LOT_IC = 100_888      # 2 short legs (measured: 600-wide iron condor)
+MARGIN_PER_LOT_BEAR = 18_750     # UNVERIFIED — bear debit spreads never measured on Kite
+
+# Exposure-margin rate in the verified formula above (2% of notional per short leg).
+EXPOSURE_MARGIN_PCT = 0.02
+
+# The lot size that applied BEFORE the 2026-07-30 correction. Trades opened then were
+# sized against 25, so anything that rebuilds or replays that era (the BS forward-test
+# recompute, intraday_replay) must keep using this, NOT the live NIFTY_LOT_SIZE.
+HISTORICAL_LOT_SIZE = 25
+
+# --- Position sizing mode -------------------------------------------------
+# COMPOUND_SIZING: size off CURRENT equity instead of the static INITIAL_CAPITAL, so
+# profits increase position size. Backtested on the real-priced 2.5y (v5.4.4):
+# fixed 71.17% -> compounded 97-100%.
+# MAX_MARGIN_UTILISATION is what makes it safe. Uncapped compounding peaks at 126.8%
+# of equity and goes margin-short on 5 days (forced liquidation). Capping TOTAL real
+# margin keeps essentially all the upside:
+#     cap 95% -> 100.29% ret, peak 99.4%, survives only a  0.6% margin hike
+#     cap 90% ->  99.81% ret, peak 94.0%, survives only a  6.3% margin hike
+#     cap 85% ->  98.70% ret, peak 89.0%, survives a      12.4% margin hike   <-- chosen
+#     cap 80% ->  97.22% ret, peak 82.3%, survives a      21.5% margin hike
+# 85% keeps ~all the return while leaving room for an exchange margin hike mid-crisis.
+COMPOUND_SIZING = True
+MAX_MARGIN_UTILISATION = 0.85
 
 # Classification thresholds (shared by all versions)
 DRAWDOWN_BULL_FULL = -0.038     # > -3.8%: bull full
@@ -104,8 +136,12 @@ VERSION_CONFIGS = {
         "color": "#4A90D9",  # blue
 
         # Sizing
-        "POSITION_SIZE_PCT": 0.20,
-        "IC_POSITION_SIZE_PCT": 0.20,
+        # Calibration constants, NOT a literal % of capital: after dividing by the
+        # (now real) MARGIN_PER_LOT and rounding to whole 65-unit lots these
+        # reproduce the same position size as the old 0.20 / lot-25 / margin-13750
+        # setup. Retuned 2026-07-30 with NIFTY_LOT_SIZE 25->65.
+        "POSITION_SIZE_PCT": 0.3972,
+        "IC_POSITION_SIZE_PCT": 0.5766,
         "MAX_CONCURRENT_POSITIONS": 3,
         "IC_MAX_CONCURRENT": 3,
         "MIN_ENTRY_GAP_DAYS": 2,
@@ -148,8 +184,12 @@ VERSION_CONFIGS = {
 
         # Clone of v5.4.2 config, but all exit checks run every 5 min (no hybrid)
         # Sizing
-        "POSITION_SIZE_PCT": 0.20,
-        "IC_POSITION_SIZE_PCT": 0.20,
+        # Calibration constants, NOT a literal % of capital: after dividing by the
+        # (now real) MARGIN_PER_LOT and rounding to whole 65-unit lots these
+        # reproduce the same position size as the old 0.20 / lot-25 / margin-13750
+        # setup. Retuned 2026-07-30 with NIFTY_LOT_SIZE 25->65.
+        "POSITION_SIZE_PCT": 0.3972,
+        "IC_POSITION_SIZE_PCT": 0.5766,
         "MAX_CONCURRENT_POSITIONS": 3,
         "IC_MAX_CONCURRENT": 3,
         # Gap relaxed to 1 (vs 2 on v5.4.2/4) — Mar–May 2026 analysis showed
@@ -197,8 +237,12 @@ VERSION_CONFIGS = {
         "color": "#50C878",  # green
 
         # Sizing: same as v5.4.2 (take every trade)
-        "POSITION_SIZE_PCT": 0.20,
-        "IC_POSITION_SIZE_PCT": 0.20,
+        # Calibration constants, NOT a literal % of capital: after dividing by the
+        # (now real) MARGIN_PER_LOT and rounding to whole 65-unit lots these
+        # reproduce the same position size as the old 0.20 / lot-25 / margin-13750
+        # setup. Retuned 2026-07-30 with NIFTY_LOT_SIZE 25->65.
+        "POSITION_SIZE_PCT": 0.3972,
+        "IC_POSITION_SIZE_PCT": 0.5766,
         "MAX_CONCURRENT_POSITIONS": 3,
         "IC_MAX_CONCURRENT": 3,
         "MIN_ENTRY_GAP_DAYS": 2,
@@ -249,8 +293,12 @@ VERSION_CONFIGS = {
         "color": "#E5534B",  # red
 
         # Sizing: same as v5.4.4
-        "POSITION_SIZE_PCT": 0.20,
-        "IC_POSITION_SIZE_PCT": 0.20,
+        # Calibration constants, NOT a literal % of capital: after dividing by the
+        # (now real) MARGIN_PER_LOT and rounding to whole 65-unit lots these
+        # reproduce the same position size as the old 0.20 / lot-25 / margin-13750
+        # setup. Retuned 2026-07-30 with NIFTY_LOT_SIZE 25->65.
+        "POSITION_SIZE_PCT": 0.3972,
+        "IC_POSITION_SIZE_PCT": 0.5766,
         "MAX_CONCURRENT_POSITIONS": 3,
         "IC_MAX_CONCURRENT": 3,
         "MIN_ENTRY_GAP_DAYS": 2,

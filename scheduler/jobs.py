@@ -31,7 +31,7 @@ from core.market_holidays import NSE_HOLIDAYS_2026 as _NSE_HOLIDAYS
 from config import (
     ACTIVE_VERSIONS, VERSION_CONFIGS, INITIAL_CAPITAL,
     DOWNSIDE_MODEL_PATH, SCALER_PATH, FEATURE_NAMES_PATH,
-    RISK_FREE_RATE, NIFTY_LOT_SIZE,
+    RISK_FREE_RATE,
 )
 
 logger = logging.getLogger(__name__)
@@ -199,7 +199,7 @@ async def record_daily_marks():
                 "sell_strike": t.sell_strike, "buy_strike": t.buy_strike,
                 "ic_call_sell": t.ic_call_sell, "ic_call_buy": t.ic_call_buy,
             }, bs_val)
-            unreal = (t.credit_received - pr["value"]) * t.num_lots * NIFTY_LOT_SIZE
+            unreal = (t.credit_received - pr["value"]) * t.num_lots * (t.lot_size or 25)
 
             # One mark per trade per day (idempotent — safe to re-run).
             await db.execute(

@@ -21,6 +21,7 @@ from config import (
     VERSION_CONFIGS,
     BULL_OTM_SELL, BULL_OTM_BUY,
     MIN_TOTAL_CREDIT, MIN_ENTRY_DTE, USE_REAL_OPTION_PRICING,
+    COMPOUND_SIZING, MAX_MARGIN_UTILISATION, EXPOSURE_MARGIN_PCT,
 )
 from core.option_pricer import (
     select_strikes, price_bull_put_spread, price_iron_condor,
@@ -210,8 +211,45 @@ class TradeManager:
             effective_size_pct = position_size_pct * size_mult
             margin_per_lot = MARGIN_PER_LOT_BULL if trade_type == "bull_put" else MARGIN_PER_LOT_IC
 
-            max_capital = INITIAL_CAPITAL * effective_size_pct
+            # Compounding: size off CURRENT equity so profits grow position size.
+            # Falls back to INITIAL_CAPITAL if the lookup fails, so a DB hiccup can
+            # never silently up-size a trade.
+            sizing_base = INITIAL_CAPITAL
+            if COMPOUND_SIZING:
+                try:
+                    sizing_base = await self._get_current_capital(db, version)
+                except Exception as e:
+                    logger.warning(f"[{version}] equity lookup failed, sizing off "
+                                   f"INITIAL_CAPITAL: {e}")
+                if not sizing_base or sizing_base <= 0:
+                    sizing_base = INITIAL_CAPITAL
+
+            max_capital = sizing_base * effective_size_pct
             num_lots = max(1, int(max_capital / margin_per_lot))
+
+            # --- Margin cap -------------------------------------------------
+            # Never let TOTAL real margin across open positions exceed
+            # MAX_MARGIN_UTILISATION of equity. Without this, compounding peaks at
+            # ~127% of equity and goes margin-short (forced liquidation). Downsize
+            # to fit; skip the trade entirely if there is not room for one lot.
+            per_unit = self._real_margin_per_unit(trade_type, strikes, credit, spot)
+            if per_unit > 0:
+                used = await self._open_margin_used(db, version, spot)
+                headroom = sizing_base * MAX_MARGIN_UTILISATION - used
+                affordable = int(headroom / (per_unit * NIFTY_LOT_SIZE))
+                if affordable < 1:
+                    logger.info(
+                        f"[{version}] Skipping entry: margin cap reached "
+                        f"(used ₹{used:,.0f} of ₹{sizing_base * MAX_MARGIN_UTILISATION:,.0f} "
+                        f"allowed at {MAX_MARGIN_UTILISATION:.0%} of ₹{sizing_base:,.0f})"
+                    )
+                    return None
+                if affordable < num_lots:
+                    logger.info(
+                        f"[{version}] Margin cap: downsizing {num_lots} -> {affordable} lots "
+                        f"(used ₹{used:,.0f}, headroom ₹{headroom:,.0f})"
+                    )
+                    num_lots = affordable
 
             total_credit = credit * num_lots * NIFTY_LOT_SIZE
             capital_deployed = num_lots * margin_per_lot
@@ -258,6 +296,7 @@ class TradeManager:
             ic_call_sell=strikes.get("ic_call_sell"),
             ic_call_buy=strikes.get("ic_call_buy"),
             num_lots=num_lots,
+            lot_size=NIFTY_LOT_SIZE,
             credit_received=credit,
             total_credit=total_credit,
             status="open",
@@ -566,11 +605,11 @@ class TradeManager:
         if trade.is_bear_debit:
             # Bear debit PnL: (current_value - entry_debit) * lots * lot_size
             entry_debit = trade.entry_debit or 0
-            realized_pnl = (current_value - entry_debit) * trade.num_lots * NIFTY_LOT_SIZE
+            realized_pnl = (current_value - entry_debit) * trade.num_lots * (trade.lot_size or 25)
         else:
             # Credit trade PnL: (credit_received - current_value) * lots * lot_size
             realized_pnl = (trade.credit_received - current_value) * \
-                            trade.num_lots * NIFTY_LOT_SIZE
+                            trade.num_lots * (trade.lot_size or 25)
 
         pnl_pct = (
             realized_pnl / trade.capital_deployed * 100
@@ -616,13 +655,13 @@ class TradeManager:
         if trade.is_bear_debit:
             entry_debit = trade.entry_debit or 0
             unrealized_pnl = (current_value - entry_debit) * \
-                              trade.num_lots * NIFTY_LOT_SIZE
+                              trade.num_lots * (trade.lot_size or 25)
             # Update trail high for trailing stop
             if current_value > trade.bear_trail_high:
                 trade.bear_trail_high = current_value
         else:
             unrealized_pnl = (trade.credit_received - current_value) * \
-                              trade.num_lots * NIFTY_LOT_SIZE
+                              trade.num_lots * (trade.lot_size or 25)
 
         trade.current_spread_value = current_value
         trade.unrealized_pnl = unrealized_pnl
@@ -719,3 +758,51 @@ class TradeManager:
         """Get current capital for version."""
         portfolio = await self.get_portfolio_state(version, db)
         return portfolio["current_capital"]
+
+    @staticmethod
+    def _real_margin_per_unit(trade_type: str, strikes: dict,
+                              credit: float, spot: float) -> float:
+        """
+        Real broker margin per UNIT, using the formula verified against live Kite
+        basket quotes on 2026-07-30 (predicted 4 structures within 1.2%):
+
+            margin = max_loss + EXPOSURE_MARGIN_PCT * spot * n_short_legs
+
+        The exposure term is ~62% of the total and does NOT shrink with narrower
+        wings, so narrowing spreads hurts capital efficiency rather than helping.
+        Returns 0.0 for debit spreads (margin there is just the premium paid).
+        """
+        if trade_type == "bear_put_debit":
+            return 0.0
+        sell = strikes.get("sell_strike")
+        buy = strikes.get("buy_strike")
+        if sell is None or buy is None:
+            return 0.0
+        width = abs(sell - buy)
+        n_short = 1
+        if trade_type == "iron_condor":
+            n_short = 2
+            # Only one wing can be breached, so max loss is the WIDER wing. Both are
+            # 2.5% of spot today, but don't assume that stays true.
+            c_sell, c_buy = strikes.get("ic_call_sell"), strikes.get("ic_call_buy")
+            if c_sell is not None and c_buy is not None:
+                width = max(width, abs(c_buy - c_sell))
+        max_loss = max(0.0, width - (credit or 0.0))
+        return max_loss + EXPOSURE_MARGIN_PCT * spot * n_short
+
+    async def _open_margin_used(self, db: AsyncSession, version: str,
+                                spot: float) -> float:
+        """Total real margin currently blocked by this version's open trades."""
+        result = await db.execute(
+            select(Trade).where(Trade.version == version, Trade.status == "open")
+        )
+        total = 0.0
+        for t in result.scalars().all():
+            per_unit = self._real_margin_per_unit(
+                t.trade_type,
+                {"sell_strike": t.sell_strike, "buy_strike": t.buy_strike,
+                 "ic_call_sell": t.ic_call_sell, "ic_call_buy": t.ic_call_buy},
+                t.credit_received, spot,
+            )
+            total += per_unit * t.num_lots * (t.lot_size or 25)
+        return total

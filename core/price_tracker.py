@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import DelayPrice, Trade, PriceSnapshot
 from core.option_pricer import compute_spread_value
 from core.timezone import now_ist, today_ist
-from config import RISK_FREE_RATE, NIFTY_LOT_SIZE
+from config import RISK_FREE_RATE
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,7 @@ class PriceTracker:
 
         # PnL delta = what you'd get entering NOW vs at signal time
         pnl_delta = (spread_value - trade.credit_received) * \
-                    trade.num_lots * NIFTY_LOT_SIZE
+                    trade.num_lots * (trade.lot_size or 25)
 
         # Update delay record
         result = await db.execute(

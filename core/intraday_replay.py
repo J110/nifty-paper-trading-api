@@ -30,7 +30,7 @@ between modes is the exit-check price path.
 from datetime import date, time
 
 from config import (
-    VERSION_CONFIGS, INITIAL_CAPITAL, NIFTY_LOT_SIZE, RISK_FREE_RATE,
+    VERSION_CONFIGS, INITIAL_CAPITAL, HISTORICAL_LOT_SIZE, RISK_FREE_RATE,
     MARGIN_PER_LOT_BULL, MARGIN_PER_LOT_IC, BULL_OTM_SELL, BULL_OTM_BUY,
     MIN_TOTAL_CREDIT, MIN_ENTRY_DTE,
 )
@@ -214,7 +214,7 @@ def _try_open(version, cfg, day, pred, open_trades, last_entry_date):
     pos_pct = cfg.get("IC_POSITION_SIZE_PCT", 0.15) if tt == "iron_condor" else cfg.get("POSITION_SIZE_PCT", 0.20)
     margin = MARGIN_PER_LOT_IC if tt == "iron_condor" else MARGIN_PER_LOT_BULL
     num_lots = max(1, int(INITIAL_CAPITAL * pos_pct * signal["size_mult"] / margin))
-    total_credit = credit * num_lots * NIFTY_LOT_SIZE
+    total_credit = credit * num_lots * HISTORICAL_LOT_SIZE
 
     dte_at_entry = (expiry - day).days
     if total_credit < MIN_TOTAL_CREDIT or dte_at_entry < MIN_ENTRY_DTE:
@@ -257,7 +257,7 @@ def replay(version, predictions, intraday_by_day, daily_close, breach_mode="spot
                 loss_only = not _full_check(version, mtime, is_eod)
                 reason, val = _check_exit(t, day, spot, low, high, vix, cfg, loss_only, is_eod, breach_mode)
                 if reason:
-                    pnl = (t["credit"] - val) * t["num_lots"] * NIFTY_LOT_SIZE
+                    pnl = (t["credit"] - val) * t["num_lots"] * HISTORICAL_LOT_SIZE
                     t.update(exit_date=day, exit_reason=reason, realized_pnl=pnl)
                     cum_pnl += pnl
                     closed.append(t)
@@ -275,7 +275,7 @@ def replay(version, predictions, intraday_by_day, daily_close, breach_mode="spot
 
         # --- EOD equity (realized + unrealized MTM at the close) ---
         cl = daily_close[day]
-        unreal = sum((t["credit"] - _value(t, cl["spot"], cl.get("vix"), day)) * t["num_lots"] * NIFTY_LOT_SIZE
+        unreal = sum((t["credit"] - _value(t, cl["spot"], cl.get("vix"), day)) * t["num_lots"] * HISTORICAL_LOT_SIZE
                      for t in open_trades)
         equity.append((day, (cum_pnl + unreal) / INITIAL_CAPITAL * 100.0))
 

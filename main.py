@@ -535,7 +535,7 @@ async def recalculate_forward_test():
         compute_spread_value, get_next_weekly_expiry,
     )
     from config import (
-        ACTIVE_VERSIONS, VERSION_CONFIGS, INITIAL_CAPITAL, NIFTY_LOT_SIZE,
+        ACTIVE_VERSIONS, VERSION_CONFIGS, INITIAL_CAPITAL, HISTORICAL_LOT_SIZE,
         RISK_FREE_RATE, MARGIN_PER_LOT_BULL, MARGIN_PER_LOT_IC,
         BULL_OTM_SELL, BULL_OTM_BUY, MIN_TOTAL_CREDIT, MIN_ENTRY_DTE,
     )
@@ -761,7 +761,7 @@ async def recalculate_forward_test():
                                 exit_reason = "expiry"
 
                         if exit_reason:
-                            realized_pnl = pnl_per_unit * ot["num_lots"] * NIFTY_LOT_SIZE
+                            realized_pnl = pnl_per_unit * ot["num_lots"] * HISTORICAL_LOT_SIZE
                             rpnl_pct = realized_pnl / ot["capital_deployed"] * 100 if ot["capital_deployed"] > 0 else 0
 
                             await db.execute(
@@ -783,7 +783,7 @@ async def recalculate_forward_test():
                             stats["trades_closed"] += 1
                         else:
                             # Update unrealized PnL
-                            unrealized_pnl = pnl_per_unit * ot["num_lots"] * NIFTY_LOT_SIZE
+                            unrealized_pnl = pnl_per_unit * ot["num_lots"] * HISTORICAL_LOT_SIZE
                             await db.execute(
                                 update(Trade).where(Trade.trade_id == ot["trade_id"]).values(
                                     current_spread_value=current_value,
@@ -855,7 +855,7 @@ async def recalculate_forward_test():
                                 max_cap = INITIAL_CAPITAL * eff_pct
                                 num_lots = max(1, int(max_cap / margin))
 
-                                total_credit = credit * num_lots * NIFTY_LOT_SIZE
+                                total_credit = credit * num_lots * HISTORICAL_LOT_SIZE
                                 capital_deployed = num_lots * margin
 
                                 # Live open_trade quality gate (previously missing here):
@@ -1761,7 +1761,7 @@ async def correct_stale_trades(correct_spot: float, correct_vix: float):
         get_next_weekly_expiry, compute_time_to_expiry_years,
     )
     from config import (
-        RISK_FREE_RATE, NIFTY_LOT_SIZE, BULL_OTM_SELL, BULL_OTM_BUY,
+        RISK_FREE_RATE, BULL_OTM_SELL, BULL_OTM_BUY,
         VERSION_CONFIGS,
     )
     from core.timezone import today_ist
@@ -1830,7 +1830,7 @@ async def correct_stale_trades(correct_spot: float, correct_vix: float):
                 else:
                     new_credit = trade.credit_received
 
-                new_total_credit = new_credit * trade.num_lots * NIFTY_LOT_SIZE
+                new_total_credit = new_credit * trade.num_lots * (trade.lot_size or 25)
 
                 # Update entry fields
                 trade.entry_spot = correct_spot
@@ -1860,7 +1860,7 @@ async def correct_stale_trades(correct_spot: float, correct_vix: float):
                         new_strikes.get("ic_call_sell"), new_strikes.get("ic_call_buy"),
                         T_exit, RISK_FREE_RATE, sigma,
                     )
-                    new_realized = (new_credit - exit_value) * trade.num_lots * NIFTY_LOT_SIZE
+                    new_realized = (new_credit - exit_value) * trade.num_lots * (trade.lot_size or 25)
                     new_pnl_pct = (
                         new_realized / trade.capital_deployed * 100
                         if trade.capital_deployed > 0 else 0

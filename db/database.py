@@ -60,6 +60,13 @@ async def init_db() -> None:
             "ALTER TABLE trades ADD COLUMN IF NOT EXISTS stop_loss_last_breach_date DATE",
             "ALTER TABLE trades ADD COLUMN IF NOT EXISTS trailing_stop_active BOOLEAN DEFAULT FALSE",
             "ALTER TABLE trades ADD COLUMN IF NOT EXISTS entry_vix FLOAT",
+            # 2026-08-01: pin the contract size onto each trade. Exit P&L is
+            # (credit - value) * num_lots * lot_size evaluated at EXIT time, and
+            # config.NIFTY_LOT_SIZE was corrected 25 -> 65 (broker-verified on Kite).
+            # Without this, every trade opened under 25 would settle at 65 — a 2.6x
+            # inflation of its realized P&L. DEFAULT 25 backfills existing rows with
+            # the size they were actually sized against.
+            "ALTER TABLE trades ADD COLUMN IF NOT EXISTS lot_size INTEGER NOT NULL DEFAULT 25",
         ]
         for sql in migrations:
             await conn.execute(text(sql))

@@ -66,6 +66,12 @@ class Trade(Base):
     ic_call_sell: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     ic_call_buy: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     num_lots: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Contract size this trade was SIZED with. Pinned per-trade because P&L is
+    # computed at EXIT time: a trade opened under lot 25 must still settle at 25 even
+    # after config.NIFTY_LOT_SIZE was corrected to 65 (2026-07-30). Existing rows
+    # default to 25 via server_default. Always read as (trade.lot_size or 25).
+    lot_size: Mapped[int] = mapped_column(Integer, nullable=False,
+                                          default=25, server_default="25")
     credit_received: Mapped[float] = mapped_column(Float, nullable=False)
     total_credit: Mapped[float] = mapped_column(Float, nullable=False)
     status: Mapped[str] = mapped_column(String(15), default="open")
