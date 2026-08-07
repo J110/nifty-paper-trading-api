@@ -1291,9 +1291,14 @@ async def debug_test_email():
     import os
     import httpx
 
+    # Use the SAME constants the real notifier uses — this endpoint previously had its
+    # own hardcoded copies, so it tested a different sender than production actually
+    # sent from and would have reported healthy while live alerts were failing.
+    from core.email_notifier import FROM_EMAIL, NOTIFY_EMAIL as _NOTIFY
+
     api_key = os.environ.get("RESEND_API_KEY", "")
-    notify_email = os.environ.get("NOTIFY_EMAIL", "anmol@turings.xyz")
-    from_email = "Nifty Trading Bot <onboarding@resend.dev>"
+    notify_email = _NOTIFY
+    from_email = FROM_EMAIL
 
     if not api_key:
         return {"status": "error", "message": "RESEND_API_KEY not set in environment"}

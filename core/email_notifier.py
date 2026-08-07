@@ -16,7 +16,15 @@ logger = logging.getLogger(__name__)
 import os
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "anmol@turings.xyz")
-FROM_EMAIL = "Nifty Trading Bot <onboarding@resend.dev>"  # Free tier uses resend.dev domain
+# MUST be a Resend-VERIFIED domain. The old default (onboarding@resend.dev — Resend's
+# shared sandbox sender) is rejected with "Domain is not verified" under load: on
+# 2026-08-06 three exit alerts fired within 4s at 15:35 and ALL failed, while a lone
+# alert at 14:40 got through. Failures are silent (see _send_email — it returns False
+# and the caller discards it), so nobody noticed the trades had closed.
+# dreamvalley.app is verified on this Resend account; override via env if that changes.
+FROM_EMAIL = os.environ.get(
+    "RESEND_FROM_EMAIL", "Nifty Trading Bot <nifty@dreamvalley.app>"
+)
 
 # ---------------------------------------------------------------------------
 # Alert deduplication: suppress repeated failure alerts for the same pipeline.
