@@ -101,8 +101,10 @@ class TradeManager:
             logger.info(f"[{version}] Max concurrent {trade_type} reached ({open_count})")
             return None
 
-        # Check minimum entry gap (only for bull/IC credit trades, not bear_call)
-        if not is_bear_debit and not is_bear_call:
+        # Check minimum entry gap. Applies to every credit structure including
+        # bear_call — the 2019-2026 validation of the bear side ran WITH the gap
+        # enforced, so exempting it here would trade a different strategy.
+        if not is_bear_debit:
             min_gap = cfg.get("MIN_ENTRY_GAP_DAYS", 2)
             last_entry = await self._get_last_entry_date(db, version)
             if last_entry and (today_ist() - last_entry).days < min_gap:
@@ -209,7 +211,11 @@ class TradeManager:
                 position_size_pct = cfg.get("BEAR_CALL_SIZE_PCT", 0.20)
 
             effective_size_pct = position_size_pct * size_mult
-            margin_per_lot = MARGIN_PER_LOT_BULL if trade_type == "bull_put" else MARGIN_PER_LOT_IC
+            # A bear_call is a ONE-sided credit spread, same shape as a bull_put —
+            # only the iron condor has two short legs and the higher IC margin.
+            # (Was: bull_put -> BULL, everything else -> IC, which over-charged
+            # bear_call by 45% and under-sized it accordingly.)
+            margin_per_lot = MARGIN_PER_LOT_IC if trade_type == "iron_condor" else MARGIN_PER_LOT_BULL
 
             # Compounding: size off CURRENT equity so profits grow position size.
             # Falls back to INITIAL_CAPITAL if the lookup fails, so a DB hiccup can
@@ -774,6 +780,16 @@ class TradeManager:
         """
         if trade_type == "bear_put_debit":
             return 0.0
+        if trade_type == "bear_call":
+            # Call-side credit spread: the legs live in the ic_call_* keys and
+            # sell_strike/buy_strike are None. Without this branch the function
+            # returned 0.0 and the caller's `if per_unit > 0` guard silently
+            # skipped the margin cap for every bear_call entry.
+            c_sell, c_buy = strikes.get("ic_call_sell"), strikes.get("ic_call_buy")
+            if c_sell is None or c_buy is None:
+                return 0.0
+            max_loss = max(0.0, abs(c_buy - c_sell) - (credit or 0.0))
+            return max_loss + EXPOSURE_MARGIN_PCT * spot
         sell = strikes.get("sell_strike")
         buy = strikes.get("buy_strike")
         if sell is None or buy is None:

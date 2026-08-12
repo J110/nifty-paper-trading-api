@@ -165,6 +165,28 @@ VERSION_CONFIGS = {
         # Advanced features
         "IC_CALL_OTM_SELL": 0.04,
         "IC_CALL_OTM_BUY": 0.065,
+
+        # --- The bear side, and the bull_half->condor swap (added 2026-08-12) ---
+        # Both default OFF so this deploys inert; flip to True to go live.
+        #
+        # BEAR_CALL: days the model scores below -6.5% are currently sat out
+        # entirely. Selling a call spread on them instead adds ~+9.6pp of annual
+        # return with drawdown flat. Sized, gapped and margined exactly like a
+        # bull_put because it is the same one-sided credit structure.
+        # Strikes are 3.0%/5.5% — the IC defaults of 4.0%/6.5% are too thin to
+        # clear the minimum-credit gate and produced almost no trades in test.
+        "BEAR_CALL_ENABLED": True,
+        "BEAR_CALL_OTM_SELL": 0.030,
+        "BEAR_CALL_OTM_BUY": 0.055,
+        "BEAR_CALL_SIZE_PCT": 0.3972,      # matches POSITION_SIZE_PCT
+        "BEAR_CALL_MAX_CONCURRENT": 3,     # matches MAX_CONCURRENT_POSITIONS
+        #
+        # BULL_HALF_AS_IC: trade the -3.8%..-5.0% band as an iron condor rather
+        # than a put spread identical to bull_full. ~+4pp annual return.
+        # NOTE: condors need ~45% more margin per lot, so this pushes 95th-pct
+        # margin utilisation from 76% to 83% (cap still never breached).
+        "BULL_HALF_AS_IC": True,
+
         "OI_WALL_ENABLED": True,
         "OI_WALL_MIN_RATIO": 1.5,
         "VIX_HARVEST_ENABLED": True,

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from db.models import Base, Trade
 from core.trade_manager import TradeManager
 from core.signal_mapper import map_signal
+from core.option_pricer import select_strikes
 from config import (VERSION_CONFIGS, INITIAL_CAPITAL, NIFTY_LOT_SIZE,
                     MAX_MARGIN_UTILISATION, MARGIN_PER_LOT_IC, COMPOUND_SIZING)
 
@@ -135,6 +136,66 @@ async def main():
         print(f"        -> equity Rs{eq:,.0f} gives {t4['num_lots']} lots "
               f"(vs {expected_lots} at starting capital)")
         check("compounded size is larger", t4["num_lots"] > expected_lots, True)
+
+    # ---- 5. bear_call respects the margin cap -----------------------------
+    # _real_margin_per_unit used to return 0.0 for bear_call (its legs live in
+    # the ic_call_* keys, not sell_strike/buy_strike), and open_trade guards on
+    # `if per_unit > 0` — so every bear_call entry silently skipped the cap.
+    import copy
+    bc_cfg = copy.deepcopy(VERSION_CONFIGS[VERSION])
+    bc_cfg["BEAR_CALL_ENABLED"] = True
+    bc_sig = map_signal(-0.075, bc_cfg)
+    check("no_trade band maps to bear_call when enabled",
+          bc_sig["trade_type"], "bear_call")
+
+    bc_strikes = select_strikes(SPOT, "bear_call", bc_cfg)
+    per_unit = TradeManager._real_margin_per_unit("bear_call", bc_strikes, 5.0, SPOT)
+    check("bear_call margin/unit is non-zero (cap will apply)", per_unit > 0, True)
+
+    # same one-sided shape as a bull_put, so the two must agree
+    bp_strikes = select_strikes(SPOT, "bull_put", bc_cfg)
+    bp_unit = TradeManager._real_margin_per_unit("bull_put", bp_strikes, 5.0, SPOT)
+    check("bear_call margin matches bull_put (one short leg)",
+          round(per_unit), round(bp_unit))
+    ic_unit = TradeManager._real_margin_per_unit(
+        "iron_condor", select_strikes(SPOT, "iron_condor", bc_cfg), 5.0, SPOT)
+    check("iron_condor margin is higher (two short legs)", ic_unit > per_unit, True)
+    print(f"        -> per unit: bull_put Rs{bp_unit:,.0f}  "
+          f"bear_call Rs{per_unit:,.0f}  iron_condor Rs{ic_unit:,.0f}")
+
+    # ---- 6. BULL_HALF_AS_IC swaps the band's structure ---------------------
+    swap_cfg = copy.deepcopy(VERSION_CONFIGS[VERSION])
+    check("bull_half is a put spread by default",
+          map_signal(-0.044, swap_cfg)["trade_type"], "bull_put")
+    swap_cfg["BULL_HALF_AS_IC"] = True
+    check("bull_half becomes an iron condor when enabled",
+          map_signal(-0.044, swap_cfg)["trade_type"], "iron_condor")
+    check("bull_full is untouched by the swap",
+          map_signal(-0.020, swap_cfg)["trade_type"], "bull_put")
+
+    # ---- 7. live v5.4.2 has both flags ON (turned on 2026-08-12) -----------
+    # v5.4.2 is the version traded with real money, so these assert the shipped
+    # behaviour, not a default. Flipping either flag off should fail here.
+    # NOTE: VERSION above is v5.4.4 (the sizing tests predate the version switch).
+    # The traded version is v5.4.2, so these checks name it explicitly.
+    live = VERSION_CONFIGS["v5.4.2"]
+    check("BEAR_CALL_ENABLED is live", live.get("BEAR_CALL_ENABLED", False), True)
+    check("BULL_HALF_AS_IC is live", live.get("BULL_HALF_AS_IC", False), True)
+    check("severe band now sells calls instead of sitting out",
+          map_signal(-0.075, live)["trade_type"], "bear_call")
+    check("mild-worry band now trades as a condor",
+          map_signal(-0.044, live)["trade_type"], "iron_condor")
+    check("calm band still a put spread",
+          map_signal(-0.020, live)["trade_type"], "bull_put")
+    check("bear_call strikes are 3.0%/5.5%, not the IC 4.0%/6.5%",
+          (live["BEAR_CALL_OTM_SELL"], live["BEAR_CALL_OTM_BUY"]), (0.030, 0.055))
+
+    # the other two versions must be untouched
+    for v in ("v5.4.3", "v5.4.4"):
+        check(f"{v} unchanged (bear off)",
+              VERSION_CONFIGS[v].get("BEAR_CALL_ENABLED", False), False)
+        check(f"{v} unchanged (condor swap off)",
+              VERSION_CONFIGS[v].get("BULL_HALF_AS_IC", False), False)
 
     print("\n" + ("ALL CHECKS PASSED" if OK else "SOME CHECKS FAILED"))
     return 0 if OK else 1
