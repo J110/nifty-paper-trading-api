@@ -121,6 +121,13 @@ app.include_router(charts_router)
 app.include_router(returns_router)
 
 
+import time as _time
+
+# /health is polled constantly; cache its DB lookup so pings don't hit Postgres.
+_HEALTH_CACHE: dict = {"at": 0.0, "data": None}
+_HEALTH_TTL = 60.0   # seconds
+
+
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     """Health check endpoint for Render + UptimeRobot pinger."""
@@ -130,28 +137,40 @@ async def health_check():
     from db.models import Prediction
     from core.timezone import now_ist, today_ist
 
-    # Quick DB check: is today's prediction present?
-    today_predictions = 0
-    last_prediction_date = None
-    db_healthy = False
-    db_error = None
-    try:
-        async with async_session_factory() as db:
-            result = await db.execute(
-                select(func.count()).select_from(Prediction).where(
-                    Prediction.date == today_ist()
+    # DB check, CACHED. Render health-checks this from several nodes and an
+    # UptimeRobot pinger hits it too, so an uncached version fired 2 queries plus a
+    # pool_pre_ping SELECT 1 on every request — tens of thousands of queries a day
+    # purely to answer "are you alive?", which was burning the Supabase Disk IO budget
+    # (warning received 2026-08-12). A pinger only needs liveness, not a fresh count.
+    now_mono = _time.monotonic()
+    cached = _HEALTH_CACHE.get("at", 0.0)
+    if now_mono - cached < _HEALTH_TTL and _HEALTH_CACHE.get("data") is not None:
+        today_predictions, last_prediction_date, db_healthy, db_error = _HEALTH_CACHE["data"]
+    else:
+        today_predictions = 0
+        last_prediction_date = None
+        db_healthy = False
+        db_error = None
+        try:
+            async with async_session_factory() as db:
+                result = await db.execute(
+                    select(func.count()).select_from(Prediction).where(
+                        Prediction.date == today_ist()
+                    )
                 )
-            )
-            today_predictions = result.scalar() or 0
+                today_predictions = result.scalar() or 0
 
-            result2 = await db.execute(
-                select(func.max(Prediction.date))
-            )
-            last_prediction_date = result2.scalar()
-            db_healthy = True
-    except Exception as e:
-        db_error = str(e)
-        logger.error(f"Health check DB query failed: {e}")
+                result2 = await db.execute(
+                    select(func.max(Prediction.date))
+                )
+                last_prediction_date = result2.scalar()
+                db_healthy = True
+        except Exception as e:
+            db_error = str(e)
+            logger.error(f"Health check DB query failed: {e}")
+        # Cache failures too, briefly — a dead DB shouldn't be re-hammered every ping.
+        _HEALTH_CACHE["at"] = now_mono
+        _HEALTH_CACHE["data"] = (today_predictions, last_prediction_date, db_healthy, db_error)
 
     scheduler_running = scheduler is not None and scheduler.running
     overall_healthy = db_healthy and scheduler_running

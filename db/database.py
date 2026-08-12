@@ -68,5 +68,16 @@ async def init_db() -> None:
             # the size they were actually sized against.
             "ALTER TABLE trades ADD COLUMN IF NOT EXISTS lot_size INTEGER NOT NULL DEFAULT 25",
         ]
+        # Indexes. The hottest query in the system is the 5-minutely exit check,
+        #   SELECT * FROM trades WHERE version=? AND status='open'
+        # which had no index and sequentially scanned the whole table for each of the
+        # 3 versions, ~84 times a day. Added 2026-08-12 after a Supabase Disk IO warning.
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS ix_trades_version_status ON trades (version, status)",
+            "CREATE INDEX IF NOT EXISTS ix_trades_exit_date ON trades (exit_date)",
+            "CREATE INDEX IF NOT EXISTS ix_daily_pnl_version_date ON daily_pnl (version, date)",
+        ]
         for sql in migrations:
+            await conn.execute(text(sql))
+        for sql in indexes:
             await conn.execute(text(sql))
