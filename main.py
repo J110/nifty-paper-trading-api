@@ -1378,16 +1378,25 @@ async def debug_test_structure_emails():
     """
     from core.email_notifier import send_trade_alert, send_exit_alert
 
+    # Include pricing_legs/pricing_source: the "Expected Leg Fills" block only
+    # renders for a real pricing source, so omitting them produced an email that
+    # looked nothing like a live signal.
     samples = [
         ("bear_call", {"sell_strike": None, "buy_strike": None,
-                       "ic_call_sell": 25150, "ic_call_buy": 25750}, -0.075),
+                       "ic_call_sell": 25150, "ic_call_buy": 25750}, -0.075,
+         [{"opt": "ce", "action": "sell", "strike": 25150, "price": 9.30, "px_source": "bid"},
+          {"opt": "ce", "action": "buy",  "strike": 25750, "price": 3.10, "px_source": "ask"}]),
         ("iron_condor", {"sell_strike": 23650, "buy_strike": 23050,
-                         "ic_call_sell": 25400, "ic_call_buy": 26000}, -0.044),
+                         "ic_call_sell": 25400, "ic_call_buy": 26000}, -0.044,
+         [{"opt": "pe", "action": "sell", "strike": 23650, "price": 4.10, "px_source": "bid"},
+          {"opt": "pe", "action": "buy",  "strike": 23050, "price": 1.85, "px_source": "ask"},
+          {"opt": "ce", "action": "sell", "strike": 25400, "price": 6.55, "px_source": "bid"},
+          {"opt": "ce", "action": "buy",  "strike": 26000, "price": 2.60, "px_source": "ask"}]),
     ]
     spot, vix = 24435.0, 11.7
     results = []
 
-    for trade_type, strikes, pred in samples:
+    for trade_type, strikes, pred, legs in samples:
         trade_id = f"TEST-{trade_type}-sample"
         trade_result = {
             "trade_id": trade_id, "trade_type": trade_type, "strikes": strikes,
@@ -1395,6 +1404,9 @@ async def debug_test_structure_emails():
             "total_credit": 6.2 * 14 * 65, "expiry": "2026-08-18",
             "max_profit": 6.2 * 14 * 65, "max_loss": (600 - 6.2) * 14 * 65,
             "capital_deployed": 973_014,
+            "pricing_legs": legs, "pricing_source": "real",
+            "real_credit": 6.2 * 14 * 65, "bs_credit": 7.4 * 14 * 65,
+            "pricing_reason": None,
         }
         signal = {"signal": trade_type, "trade_type": trade_type, "size_mult": 1.0}
         try:
