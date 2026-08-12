@@ -1363,6 +1363,65 @@ async def debug_test_email():
         }
 
 
+@app.post("/api/debug/test-structure-emails")
+async def debug_test_structure_emails():
+    """Send REAL entry+exit alerts for each structure, using the production
+    builders and sample strikes.
+
+    /api/debug/test-email only sends a plain "it works" message, so it never
+    exercised the per-structure leg rendering. bear_call keeps its legs in
+    ic_call_sell/ic_call_buy rather than sell_strike/buy_strike, which is
+    exactly where the "None / None" exit-email bug came from — this endpoint
+    proves the real templates render before a live signal depends on them.
+
+    Every sample uses a TEST-... trade_id so it can't be mistaken for a signal.
+    """
+    from core.email_notifier import send_trade_alert, send_exit_alert
+
+    samples = [
+        ("bear_call", {"sell_strike": None, "buy_strike": None,
+                       "ic_call_sell": 25150, "ic_call_buy": 25750}, -0.075),
+        ("iron_condor", {"sell_strike": 23650, "buy_strike": 23050,
+                         "ic_call_sell": 25400, "ic_call_buy": 26000}, -0.044),
+    ]
+    spot, vix = 24435.0, 11.7
+    results = []
+
+    for trade_type, strikes, pred in samples:
+        trade_id = f"TEST-{trade_type}-sample"
+        trade_result = {
+            "trade_id": trade_id, "trade_type": trade_type, "strikes": strikes,
+            "num_lots": 14, "lot_size": 65, "credit": 6.2,
+            "total_credit": 6.2 * 14 * 65, "expiry": "2026-08-18",
+            "max_profit": 6.2 * 14 * 65, "max_loss": (600 - 6.2) * 14 * 65,
+            "capital_deployed": 973_014,
+        }
+        signal = {"signal": trade_type, "trade_type": trade_type, "size_mult": 1.0}
+        try:
+            entry_ok = await send_trade_alert(
+                version="v5.4.2", signal=signal, trade_result=trade_result,
+                spot=spot, vix=vix, prediction=pred,
+            )
+        except Exception as e:
+            entry_ok = f"error: {e}"
+        try:
+            exit_ok = await send_exit_alert(
+                version="v5.4.2", trade_id=trade_id, exit_reason="profit_target",
+                trade_type=trade_type, entry_spot=spot, exit_spot=spot + 85,
+                realized_pnl=42_350.0, pnl_pct=4.7,
+                sell_strike=strikes["sell_strike"], buy_strike=strikes["buy_strike"],
+                ic_call_sell=strikes["ic_call_sell"], ic_call_buy=strikes["ic_call_buy"],
+            )
+        except Exception as e:
+            exit_ok = f"error: {e}"
+        results.append({"trade_type": trade_type,
+                        "entry_email": entry_ok, "exit_email": exit_ok})
+
+    return {"status": "done", "sent": results,
+            "note": "4 emails: entry+exit for bear_call and iron_condor. "
+                    "All use TEST-* trade ids — do not trade them."}
+
+
 @app.post("/api/debug/recompute-date")
 async def debug_recompute_date(target_date: str):
     """
