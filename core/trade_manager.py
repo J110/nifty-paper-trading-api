@@ -648,6 +648,11 @@ class TradeManager:
             "pnl_pct": pnl_pct,
             "sell_strike": trade.sell_strike,
             "buy_strike": trade.buy_strike,
+            # A bear_call has NO put legs — both of the above are None for it, and
+            # the condor has two legs the exit email never showed. Carry the call
+            # legs through so the email can render what was actually traded.
+            "ic_call_sell": trade.ic_call_sell,
+            "ic_call_buy": trade.ic_call_buy,
             "is_bear_debit": trade.is_bear_debit,
             "bear_tier": trade.bear_tier,
         }

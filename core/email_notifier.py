@@ -339,6 +339,8 @@ def _build_exit_html(
     pnl_pct: float,
     sell_strike: float,
     buy_strike: float,
+    ic_call_sell: float = None,
+    ic_call_buy: float = None,
 ) -> str:
     """Build HTML for a trade exit notification."""
     cfg = VERSION_CONFIGS.get(version, {})
@@ -347,6 +349,23 @@ def _build_exit_html(
     pnl_color = "#3fb950" if is_profit else "#f85149"
     header_color = "#3fb950" if is_profit else "#f85149"
     emoji = "\u2705" if is_profit else "\u274C"
+
+    # Which legs actually exist depends on the structure. A bear_call has only
+    # call legs (sell_strike/buy_strike are both None and used to render as
+    # "None / None"); an iron condor has four and only ever showed two.
+    def _fmt(v):
+        return f"{v:,.0f}" if isinstance(v, (int, float)) else "N/A"
+
+    if trade_type == "bear_call":
+        strikes_label = "Strikes (calls)"
+        strikes_text = f"sell {_fmt(ic_call_sell)} / buy {_fmt(ic_call_buy)}"
+    elif trade_type == "iron_condor":
+        strikes_label = "Strikes"
+        strikes_text = (f"puts {_fmt(sell_strike)} / {_fmt(buy_strike)} &nbsp;\u00B7&nbsp; "
+                        f"calls {_fmt(ic_call_sell)} / {_fmt(ic_call_buy)}")
+    else:
+        strikes_label = "Strikes"
+        strikes_text = f"{_fmt(sell_strike)} / {_fmt(buy_strike)}"
 
     return f"""
     <div style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;background:#0d1117;border:1px solid #30363d;border-radius:12px;overflow:hidden;">
@@ -370,8 +389,8 @@ def _build_exit_html(
                     <td style="color:#e6edf3;padding:6px 12px;font-weight:600;">{entry_spot:,.1f}</td></tr>
                 <tr><td style="color:#8b949e;padding:6px 12px;">Exit Spot</td>
                     <td style="color:#e6edf3;padding:6px 12px;font-weight:600;">{exit_spot:,.1f}</td></tr>
-                <tr><td style="color:#8b949e;padding:6px 12px;">Strikes</td>
-                    <td style="color:#e6edf3;padding:6px 12px;font-weight:600;">{sell_strike} / {buy_strike}</td></tr>
+                <tr><td style="color:#8b949e;padding:6px 12px;">{strikes_label}</td>
+                    <td style="color:#e6edf3;padding:6px 12px;font-weight:600;">{strikes_text}</td></tr>
                 <tr><td style="color:#8b949e;padding:6px 12px;">Realized P&L</td>
                     <td style="color:{pnl_color};padding:6px 12px;font-weight:700;font-size:16px;">
                         {'+' if is_profit else ''}{_format_currency(realized_pnl)} ({pnl_pct:+.1f}%)
@@ -464,6 +483,8 @@ async def send_exit_alert(
     pnl_pct: float,
     sell_strike: float,
     buy_strike: float,
+    ic_call_sell: float = None,
+    ic_call_buy: float = None,
 ) -> bool:
     """Send email when a trade is closed."""
     if not RESEND_API_KEY:
@@ -483,7 +504,7 @@ async def send_exit_alert(
     html = _build_exit_html(
         version, trade_id, exit_reason, trade_type,
         entry_spot, exit_spot, realized_pnl, pnl_pct,
-        sell_strike, buy_strike,
+        sell_strike, buy_strike, ic_call_sell, ic_call_buy,
     )
     return await _send_email(subject, html)
 

@@ -803,6 +803,8 @@ async def check_all_exits():
                                 pnl_pct=ct["pnl_pct"],
                                 sell_strike=ct["sell_strike"],
                                 buy_strike=ct["buy_strike"],
+                                ic_call_sell=ct.get("ic_call_sell"),
+                                ic_call_buy=ct.get("ic_call_buy"),
                             )
                         except Exception as e:
                             logger.error(
@@ -866,6 +868,8 @@ async def check_v542_midday_pt():
                             pnl_pct=ct["pnl_pct"],
                             sell_strike=ct["sell_strike"],
                             buy_strike=ct["buy_strike"],
+                            ic_call_sell=ct.get("ic_call_sell"),
+                            ic_call_buy=ct.get("ic_call_buy"),
                         )
                     except Exception as e:
                         logger.error(
@@ -924,6 +928,8 @@ async def eod_processing():
                                 pnl_pct=ct["pnl_pct"],
                                 sell_strike=ct["sell_strike"],
                                 buy_strike=ct["buy_strike"],
+                                ic_call_sell=ct.get("ic_call_sell"),
+                                ic_call_buy=ct.get("ic_call_buy"),
                             )
                         except Exception as e:
                             logger.error(
