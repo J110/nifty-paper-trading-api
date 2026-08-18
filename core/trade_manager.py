@@ -22,6 +22,7 @@ from config import (
     BULL_OTM_SELL, BULL_OTM_BUY,
     MIN_TOTAL_CREDIT, MIN_ENTRY_DTE, USE_REAL_OPTION_PRICING,
     COMPOUND_SIZING, MAX_MARGIN_UTILISATION, EXPOSURE_MARGIN_PCT,
+    SIZING_CAPITAL_OVERRIDE,
 )
 from core.option_pricer import (
     select_strikes, price_bull_put_spread, price_iron_condor,
@@ -221,7 +222,14 @@ class TradeManager:
             # Falls back to INITIAL_CAPITAL if the lookup fails, so a DB hiccup can
             # never silently up-size a trade.
             sizing_base = INITIAL_CAPITAL
-            if COMPOUND_SIZING:
+            if SIZING_CAPITAL_OVERRIDE:
+                # Size off the REAL broker balance. _get_current_capital() sums P&L
+                # from the trades table, which is dominated by PAPER trades running
+                # since Mar 2024 — on 2026-08-18 it implied Rs37.5L of equity against
+                # a real Rs25.12L account (1.49x). Both the lot count and the 85%
+                # margin cap below derive from sizing_base, so this one line fixes both.
+                sizing_base = SIZING_CAPITAL_OVERRIDE
+            elif COMPOUND_SIZING:
                 try:
                     sizing_base = await self._get_current_capital(db, version)
                 except Exception as e:

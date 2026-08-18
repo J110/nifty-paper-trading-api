@@ -103,7 +103,10 @@ async def main():
         used = await tm._open_margin_used(db, VERSION, SPOT)
         print(f"        -> {t2['num_lots']} lots, total Rs{used:,.0f} "
               f"({100*used/INITIAL_CAPITAL:.1f}% of equity)")
-        check("total within 85% cap", used <= INITIAL_CAPITAL * MAX_MARGIN_UTILISATION, True)
+        from config import SIZING_CAPITAL_OVERRIDE as _OV
+        _base = _OV or INITIAL_CAPITAL
+        check("total within 85% cap (of the real-capital base)",
+              used <= _base * MAX_MARGIN_UTILISATION, True)
 
     print("\n3. cap already consumed -> trade must be refused")
     eng, Session = await fresh()
@@ -133,9 +136,40 @@ async def main():
         check("equity reflects profit", round(eq), INITIAL_CAPITAL + 1_000_000)
         t4 = await tm.open_trade(ic_signal(), VERSION, SPOT, VIX, db, dhan_client=None)
         assert t4, "no trade opened"
-        print(f"        -> equity Rs{eq:,.0f} gives {t4['num_lots']} lots "
-              f"(vs {expected_lots} at starting capital)")
-        check("compounded size is larger", t4["num_lots"] > expected_lots, True)
+        import config as _cfgmod
+        if _cfgmod.SIZING_CAPITAL_OVERRIDE:
+            # THE FIX: Rs10L of paper profit must not grow the real position.
+            print(f"        -> paper equity Rs{eq:,.0f}, but override pins sizing to "
+                  f"Rs{_cfgmod.SIZING_CAPITAL_OVERRIDE:,} -> {t4['num_lots']} lots")
+            check("paper profit does NOT inflate the real size",
+                  t4["num_lots"] <= expected_lots, True)
+            # and compounding must still work when the override is removed
+            import core.trade_manager as _tm
+            _saved = _tm.SIZING_CAPITAL_OVERRIDE
+            _tm.SIZING_CAPITAL_OVERRIDE = None
+            try:
+                eng3, Session3 = await fresh()
+                async with Session3() as db3:
+                    db3.add(Trade(trade_id="seed3", version=VERSION, date=date(2026,1,1),
+                                  signal_type="iron_condor", trade_type="iron_condor",
+                                  entry_mode="normal", entry_date=date(2026,1,1),
+                                  entry_time=datetime.now(timezone.utc), entry_spot=SPOT,
+                                  expiry=date(2026,1,6), sell_strike=1, buy_strike=1,
+                                  num_lots=1, lot_size=25, credit_received=1.0,
+                                  total_credit=1.0, status="closed",
+                                  realized_pnl=1_000_000.0, position_size_pct=0.2,
+                                  capital_deployed=1.0))
+                    await db3.commit()
+                    t4b = await tm.open_trade(ic_signal(), VERSION, SPOT, VIX, db3,
+                                              dhan_client=None)
+                    check("compounding still works when override is None",
+                          t4b["num_lots"] > expected_lots, True)
+            finally:
+                _tm.SIZING_CAPITAL_OVERRIDE = _saved
+        else:
+            print(f"        -> equity Rs{eq:,.0f} gives {t4['num_lots']} lots "
+                  f"(vs {expected_lots} at starting capital)")
+            check("compounded size is larger", t4["num_lots"] > expected_lots, True)
 
     # ---- 5. bear_call respects the margin cap -----------------------------
     # _real_margin_per_unit used to return 0.0 for bear_call (its legs live in
@@ -196,6 +230,26 @@ async def main():
               VERSION_CONFIGS[v].get("BEAR_CALL_ENABLED", False), False)
         check(f"{v} unchanged (condor swap off)",
               VERSION_CONFIGS[v].get("BULL_HALF_AS_IC", False), False)
+
+    # ---- 8. SIZING_CAPITAL_OVERRIDE sizes off the REAL account ------------
+    # Compounding sized off _get_current_capital(), which sums P&L from a trades
+    # table dominated by PAPER trades since Mar 2024. On 2026-08-18 that implied
+    # Rs37.47L of equity (Rs25L start + Rs12.47L paper profit) and the signal email
+    # said 21 lots against a real Rs25.12L account. Correct answer was 14.
+    from config import SIZING_CAPITAL_OVERRIDE, MARGIN_PER_LOT_BULL
+    v542 = VERSION_CONFIGS["v5.4.2"]
+    pct = v542["POSITION_SIZE_PCT"]
+    check("override is set to the real balance", SIZING_CAPITAL_OVERRIDE, 2_512_000)
+    real_lots = int(SIZING_CAPITAL_OVERRIDE * pct / MARGIN_PER_LOT_BULL)
+    paper_lots = int((2_500_000 + 1_247_433) * pct / MARGIN_PER_LOT_BULL)
+    check("real capital gives the size actually placed", real_lots, 14)
+    check("paper equity would have given the emailed size", paper_lots, 21)
+    print(f"        -> real Rs{SIZING_CAPITAL_OVERRIDE:,} = {real_lots} lots  |  "
+          f"paper Rs{2_500_000+1_247_433:,} = {paper_lots} lots")
+
+    # and the margin cap must key off the same base, not the paper curve
+    check("margin cap headroom uses real capital",
+          round(SIZING_CAPITAL_OVERRIDE * MAX_MARGIN_UTILISATION), 2_135_200)
 
     print("\n" + ("ALL CHECKS PASSED" if OK else "SOME CHECKS FAILED"))
     return 0 if OK else 1

@@ -111,6 +111,19 @@ HISTORICAL_LOT_SIZE = 25
 COMPOUND_SIZING = True
 MAX_MARGIN_UTILISATION = 0.85
 
+# SIZING_CAPITAL_OVERRIDE: the REAL broker balance to size against.
+#
+# Compounding sizes off _get_current_capital(), which sums realized P&L from the
+# trades table -- and that table has been accumulating PAPER trades since Mar 2024.
+# On 2026-08-18 that was Rs12.47L of simulated profit on top of the Rs25L start, so
+# the model sized off Rs37.5L and emailed 21 lots against a real account of Rs25.12L
+# -- 1.49x the money that actually exists. The gap widens as paper equity compounds.
+#
+# Set this to the real balance and both the lot count AND the 85% margin cap size
+# off it. Set to None to fall back to the paper equity curve (backtests/paper only).
+# Bump it as the real account actually grows.
+SIZING_CAPITAL_OVERRIDE = 2_512_000
+
 # Classification thresholds (shared by all versions)
 DRAWDOWN_BULL_FULL = -0.038     # > -3.8%: bull full
 DRAWDOWN_BULL_HALF = -0.050     # -3.8% to -5.0%: bull half
